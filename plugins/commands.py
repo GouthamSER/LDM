@@ -15,6 +15,10 @@ from pyrogram.errors import FloodWait
 GLOBAL_STATE = {}
 ARIA2_API = None
 
+# Cap concurrent Telegram uploads at 4 — extra uploads queue instead of
+# blocking sequentially, so a slow 3-4min upload doesn't stall the rest.
+UPLOAD_SEMAPHORE = asyncio.Semaphore(4)
+
 # --- Helper Functions ---
 
 def progress_bar(done, total, size=12):
@@ -55,6 +59,24 @@ def format_size(b):
         b /= 1024
         unit += 1
     return f"{b:.2f}{units[unit]}"
+
+# --- Filename Cleaner ---
+# Strips site-tag junk like "[www.xxxmovies.xyz] Movie.mkv" or
+# "www.xxx.com - Movie.mkv" down to just "Movie.mkv".
+import re as _re
+_SITE_TAG_RE = _re.compile(
+    r'^\s*[\[\(]?\s*(?:www\.)?[\w-]+\.(?:xyz|com|net|org|info|cc|to|me|in|co|live|link|club|'
+    r'site|online|fun|icu|mx|pw|sx|vip|cam|gg|click|download|mov|pro|biz|asia|tv|ws)'
+    r'(?:\.[a-z]{2,4})?\s*[\]\)]?\s*[-_.:|]*\s*',
+    _re.IGNORECASE
+)
+
+def clean_filename(name):
+    base, ext = os.path.splitext(name)
+    cleaned = _SITE_TAG_RE.sub('', base, count=1).strip(" -_.")
+    if not cleaned:
+        cleaned = base.strip(" -_.") or base
+    return f"{cleaned}{ext}"
 
 # --- Async Helper Functions ---
 
@@ -257,32 +279,35 @@ def upload_progress(current, total, gid, start_time, name, parse_mode, loop, dow
 # --- Upload Handler (Runs in the main event loop) ---
 
 async def upload_file(app, msg, file_path, name, file_size, loop, gid, download_index, user_first, user_id):
-    GLOBAL_STATE["UPLOAD_COUNT"] += 1
-    try:
-        await app.send_document(
-            msg.chat.id, 
-            file_path,
-            caption=f"✅ **{name}**\nSize: {format_size(file_size)}",
-            progress=upload_progress, 
-            progress_args=(gid, time.time(), name, enums.ParseMode.MARKDOWN, loop, download_index, user_first, user_id)
-        )
-        await edit_message_async(msg, f"✅ Upload complete for **{name}**!", parse_mode=enums.ParseMode.MARKDOWN)
-    
-    except Exception as e:
-        cancellation_message = "Upload manually cancelled by user."
+    # Queues past 4 concurrent uploads instead of blocking the caller —
+    # slow uploads (3-4min) no longer stall other tasks waiting to start.
+    async with UPLOAD_SEMAPHORE:
+        GLOBAL_STATE["UPLOAD_COUNT"] += 1
+        try:
+            await app.send_document(
+                msg.chat.id, 
+                file_path,
+                caption=f"✅ **{name}**\nSize: {format_size(file_size)}",
+                progress=upload_progress, 
+                progress_args=(gid, time.time(), name, enums.ParseMode.MARKDOWN, loop, download_index, user_first, user_id)
+            )
+            await edit_message_async(msg, f"✅ Upload complete for **{name}**!", parse_mode=enums.ParseMode.MARKDOWN)
         
-        if cancellation_message in str(e):
-            print(f"Upload GID {gid} was gracefully cancelled.")
+        except Exception as e:
+            cancellation_message = "Upload manually cancelled by user."
+            
+            if cancellation_message in str(e):
+                print(f"Upload GID {gid} was gracefully cancelled.")
+            
+            elif not GLOBAL_STATE["ACTIVE"].get(gid, {}).get("cancel", False):
+                print(f"❌ Upload GID {gid} failed unexpectedly: {e}")
+                await edit_message_async(msg, f"❌ Upload failed: {str(e)}", parse_mode=None)
         
-        elif not GLOBAL_STATE["ACTIVE"].get(gid, {}).get("cancel", False):
-            print(f"❌ Upload GID {gid} failed unexpectedly: {e}")
-            await edit_message_async(msg, f"❌ Upload failed: {str(e)}", parse_mode=None)
-    
-    finally:
-        GLOBAL_STATE["UPLOAD_COUNT"] -= 1
-        GLOBAL_STATE["ACTIVE"].pop(gid, None) 
-        if os.path.exists(file_path):
-            await asyncio.to_thread(os.remove, file_path)
+        finally:
+            GLOBAL_STATE["UPLOAD_COUNT"] -= 1
+            GLOBAL_STATE["ACTIVE"].pop(gid, None) 
+            if os.path.exists(file_path):
+                await asyncio.to_thread(os.remove, file_path)
 
 # ================= STATUS FUNCTIONS =================
 
@@ -360,9 +385,12 @@ async def start_handler(_, m):
         "**📚 How to Use Me:**\n"
         "┠ To start a download: `/l <Direct_URL>`\n"
         "┠ To leech & extract: `/l <Direct_URL> -e`\n"
+        "┠ To leech a magnet: `/ql <magnet_link>`\n"
+        "┠ To leech a .torrent: reply to the file with `/ql`\n"
         "┠ To check active transfers: `/status`\n"
         "┠ To view system stats: `/stats`\n"
         "┖ To cancel an active task: `/cancel<index>_<gid>`\n\n"
+        "**⚡ Uploads:** up to 4 run in parallel — no waiting on slow files.\n\n"
         "**📦 Extract Mode (`-e` flag):**\n"
         "┠ Supports: `.zip` `.7z` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tar.xz`\n"
         "┖ Powered by **py7zr** / **tarfile** (no `.rar`, needs `unrar` binary)\n\n"
@@ -407,11 +435,83 @@ async def leech_handler(app, m: Message):
     except Exception as e:
         return await reply_message_async(m, f"Failed to start download: {e}", parse_mode=None)
 
+    await _process_task(
+        app, m, dl, gid, extract_mode,
+        mode_tag="#Extract | #7zip" if extract_mode else "#Leech | #Aria2"
+    )
+
+
+async def ql_handler(app, m: Message):
+    """
+    /ql <magnet_link> [-e]        — leech a magnet
+    Reply to a .torrent file with /ql [-e]  — leech that torrent
+    """
+    args = m.command[1:] if len(m.command) > 1 else []
+    extract_mode = "-e" in args
+    text_parts = [a for a in args if a != "-e"]
+
+    torrent_path   = None
+    magnet_uri     = text_parts[0] if text_parts else None
+    replied        = m.reply_to_message
+
+    # ── Case 1: replying to a .torrent file ─────────────────────────────────
+    if replied and replied.document:
+        fname = (replied.document.file_name or "").lower()
+        is_torrent_doc = fname.endswith(".torrent") or replied.document.mime_type == "application/x-bittorrent"
+        if is_torrent_doc:
+            try:
+                torrent_path = await app.download_media(
+                    replied,
+                    file_name=os.path.join(GLOBAL_STATE["DOWNLOAD_DIR"], f"ql_{replied.document.file_unique_id}.torrent")
+                )
+            except Exception as e:
+                return await reply_message_async(m, f"❌ Failed to fetch .torrent file: {e}", parse_mode=None)
+
+    if not torrent_path and not magnet_uri:
+        return await reply_message_async(
+            m,
+            "Usage:\n"
+            "`/ql <magnet_link>`        — Leech a magnet link\n"
+            "`/ql <magnet_link> -e`     — Leech magnet, extract, then upload\n"
+            "Reply to a `.torrent` file with `/ql` (or `/ql -e`) to leech it",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+
+    if magnet_uri and not magnet_uri.startswith("magnet:"):
+        return await reply_message_async(m, "❌ Not a valid magnet link (must start with `magnet:`).", parse_mode=enums.ParseMode.MARKDOWN)
+
+    options = {
+        "dir": GLOBAL_STATE["DOWNLOAD_DIR"],
+        "max-connection-per-server": "4",
+        "seed-time": "0",
+        "bt-stop-timeout": "600"
+    }
+
+    try:
+        if torrent_path:
+            dl = await asyncio.to_thread(ARIA2_API.add_torrent, torrent_path, options=options)
+        else:
+            dl = await asyncio.to_thread(ARIA2_API.add_magnet, magnet_uri, options=options)
+        gid = dl.gid
+    except Exception as e:
+        return await reply_message_async(m, f"Failed to start torrent/magnet download: {e}", parse_mode=None)
+
+    await _process_task(
+        app, m, dl, gid, extract_mode,
+        mode_tag="#Extract | #Torrent" if extract_mode else "#Leech | #Magnet"
+    )
+
+
+async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag):
+    """
+    Shared tail: progress-tracks an already-added aria2 download (URL, magnet,
+    or .torrent) through completion, then extracts (optional) and uploads.
+    Handles magnet metadata -> real-download GID handoff automatically.
+    """
     download_index = GLOBAL_STATE["DOWNLOAD_COUNTER"]
     GLOBAL_STATE["DOWNLOAD_COUNTER"] += 1
 
     start_time = time.time()
-    mode_tag = "#Extract | #7zip" if extract_mode else "#Leech | #Aria2"
 
     msg = await reply_message_async(
         m,
@@ -424,11 +524,22 @@ async def leech_handler(app, m: Message):
 
     # ── Download progress loop ─────────────────────────────────────────────
     while not dl.is_complete:
-        if GLOBAL_STATE["ACTIVE"][gid]["cancel"] or dl.is_removed or dl.has_failed:
+        if GLOBAL_STATE["ACTIVE"].get(gid, {}).get("cancel") or dl.is_removed or dl.has_failed:
             await edit_message_async(msg, f"Download {gid} finished, removed, or failed.", parse_mode=None)
             break
 
         await asyncio.to_thread(dl.update)
+
+        # ── Magnet metadata handoff: once metadata resolves, aria2 spawns a
+        # new GID for the real torrent download. Follow it transparently.
+        followed = getattr(dl, "followed_by_ids", None)
+        if dl.is_complete and followed:
+            new_gid = followed[0]
+            GLOBAL_STATE["ACTIVE"].pop(gid, None)
+            gid = new_gid
+            dl = await asyncio.to_thread(ARIA2_API.get_download, gid)
+            GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time}
+            continue
 
         done  = dl.completed_length
         total = dl.total_length
@@ -449,7 +560,7 @@ async def leech_handler(app, m: Message):
                     f"┠ Speed: {format_speed(speed)} | Elapsed: {elapsed_str}\n"
                     f"┠ Engine: Aria2 v1.36.0\n"
                     f"┠ Mode: {mode_tag}\n"
-                    f"┠ Seeders: N/A | Leechers: N/A\n"
+                    f"┠ Seeders: {getattr(dl, 'num_seeders', 'N/A')} | Leechers: N/A\n"
                     f"┠ User: {m.from_user.first_name} | ID: {m.from_user.id}\n"
                     f"┖ /cancel{download_index}_{gid}",
                     parse_mode=None
@@ -484,6 +595,17 @@ async def leech_handler(app, m: Message):
     except Exception:
         return await edit_message_async(msg, "❌ File corrupted or empty.", parse_mode=None)
 
+    # ── Clean junk site-tag prefixes from the filename ──────────────────────
+    original_name = os.path.basename(file_path)
+    clean_name = clean_filename(original_name)
+    if clean_name != original_name:
+        new_path = os.path.join(os.path.dirname(file_path), clean_name)
+        try:
+            os.rename(file_path, new_path)
+            file_path = new_path
+        except Exception:
+            clean_name = original_name  # rename failed, fall back to original
+
     # ══════════════════════════════════════════════════════════════════════
     # EXTRACT MODE  (-e flag)
     # ══════════════════════════════════════════════════════════════════════
@@ -497,7 +619,7 @@ async def leech_handler(app, m: Message):
         loop = asyncio.get_running_loop()
         await edit_message_async(
             msg,
-            f"{download_index}. {dl.name}\n"
+            f"{download_index}. {clean_name}\n"
             f"┃ {progress_bar(0, 1)}\n"
             f"┠ Processed: 0B of ?\n"
             f"┠ Status: Extracting | ETA: --\n"
@@ -510,7 +632,7 @@ async def leech_handler(app, m: Message):
 
         success, extract_msg = await extract_file(
             file_path, extract_dir,
-            msg, dl.name, download_index,
+            msg, clean_name, download_index,
             m.from_user.first_name, m.from_user.id, loop
         )
 
@@ -545,20 +667,29 @@ async def leech_handler(app, m: Message):
 
         await edit_message_async(
             msg,
-            f"✅ Extracted **{len(extracted_files)}** file(s) from `{dl.name}`.\n"
-            f"⬆️ Starting upload of all extracted files...",
+            f"✅ Extracted **{len(extracted_files)}** file(s) from `{clean_name}`.\n"
+            f"⬆️ Uploading (up to 4 in parallel)...",
             parse_mode=enums.ParseMode.MARKDOWN
         )
 
-        # Upload each extracted file sequentially (preserves order, easier to track)
+        # ── Prep all file entries first (fast, no waiting) ──────────────────
+        upload_jobs = []
         for idx, extracted_path in enumerate(extracted_files, start=1):
-            extracted_name = os.path.basename(extracted_path)
+            original_extracted_name = os.path.basename(extracted_path)
+            extracted_name = clean_filename(original_extracted_name)
+            if extracted_name != original_extracted_name:
+                new_extracted_path = os.path.join(os.path.dirname(extracted_path), extracted_name)
+                try:
+                    os.rename(extracted_path, new_extracted_path)
+                    extracted_path = new_extracted_path
+                except Exception:
+                    extracted_name = original_extracted_name
             extracted_size = os.path.getsize(extracted_path)
             sub_gid        = f"{gid}_ex{idx}"
 
-            await edit_message_async(
-                msg,
-                f"⬆️ Uploading file **{idx}/{len(extracted_files)}**: `{extracted_name}`\n"
+            file_msg = await reply_message_async(
+                m,
+                f"⬆️ Queued **{idx}/{len(extracted_files)}**: `{extracted_name}`\n"
                 f"Size: {format_size(extracted_size)}",
                 parse_mode=enums.ParseMode.MARKDOWN
             )
@@ -568,16 +699,23 @@ async def leech_handler(app, m: Message):
                 "file_path":   extracted_path,
                 "name":        extracted_name,
                 "last_edit":   0,
-                "msg":         msg,
+                "msg":         file_msg,
                 "extract_dir": extract_dir,   # so cancel can nuke the whole folder
                 "base_gid":    gid            # so cancel can kill all siblings
             }
+            upload_jobs.append((extracted_path, extracted_name, extracted_size, sub_gid, file_msg))
 
-            await upload_file(
-                app, msg, extracted_path, extracted_name,
+        # ── Fire all uploads concurrently — UPLOAD_SEMAPHORE caps it at 4
+        # actually running at once; the rest queue automatically. No more
+        # waiting on each file one-by-one before the next starts. ──────────
+        await asyncio.gather(*[
+            upload_file(
+                app, file_msg, extracted_path, extracted_name,
                 extracted_size, loop, sub_gid,
                 download_index, m.from_user.first_name, m.from_user.id
             )
+            for extracted_path, extracted_name, extracted_size, sub_gid, file_msg in upload_jobs
+        ])
 
         # Final cleanup: remove extracted folder
         try:
@@ -590,7 +728,7 @@ async def leech_handler(app, m: Message):
 
         await edit_message_async(
             msg,
-            f"🎉 All **{len(extracted_files)}** extracted file(s) from `{dl.name}` uploaded successfully!",
+            f"🎉 All **{len(extracted_files)}** extracted file(s) from `{clean_name}` uploaded successfully!",
             parse_mode=enums.ParseMode.MARKDOWN
         )
         return  # Done with extract mode
@@ -600,7 +738,7 @@ async def leech_handler(app, m: Message):
     # ══════════════════════════════════════════════════════════════════════
     await edit_message_async(
         msg,
-        f"✅ Download complete! Starting upload of **{dl.name}**\n"
+        f"✅ Download complete! Starting upload of **{clean_name}**\n"
         f"To cancel upload, use `/cancel{download_index}_{gid}`",
         parse_mode=enums.ParseMode.MARKDOWN
     )
@@ -608,14 +746,14 @@ async def leech_handler(app, m: Message):
     GLOBAL_STATE["ACTIVE"][gid] = {
         "cancel":    False,
         "file_path": file_path,
-        "name":      dl.name,
+        "name":      clean_name,
         "last_edit": 0,
         "msg":       msg
     }
     loop = asyncio.get_running_loop()
     asyncio.create_task(
         upload_file(
-            app, msg, file_path, dl.name, file_size,
+            app, msg, file_path, clean_name, file_size,
             loop, gid, download_index,
             m.from_user.first_name, m.from_user.id
         )
@@ -845,6 +983,10 @@ def register_handlers(app, aria2_api, state_vars):
     @app.on_message(filters.command(["l", "leech"]))
     async def leech_wrapper(client, message):
         await leech_handler(client, message)
+
+    @app.on_message(filters.command("ql"))
+    async def ql_wrapper(client, message):
+        await ql_handler(client, message)
 
     @app.on_message(filters.command("status"))
     async def status_wrapper(client, message):
