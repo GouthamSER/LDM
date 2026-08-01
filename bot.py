@@ -17,15 +17,19 @@ except ImportError:
     UVICORN_AVAILABLE = False
 # -----------------------
 
-# ================= CONFIG =================
-API_ID = int(os.getenv("API_ID", ""))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# ================= CONFIG (single source of truth: config.py) =================
+import config
 
-DOWNLOAD_DIR = os.path.abspath("downloads")
-ARIA2_PORT = 6801
-HEALTH_PORT = int(os.getenv("PORT", 8000))
-ARIA2_SECRET = "gjxdml"
+API_ID       = config.API_ID
+API_HASH     = config.API_HASH
+BOT_TOKEN    = config.BOT_TOKEN
+
+DOWNLOAD_DIR = os.path.abspath(config.DOWNLOAD_DIR)
+ARIA2_PORT   = config.ARIA2_PORT
+ARIA2_HOST   = config.ARIA2_HOST
+ARIA2_SECRET = config.ARIA2_SECRET
+HEALTH_PORT  = config.HEALTH_PORT
+ENGINE_NAME  = config.ENGINE_NAME
 
 # ================= CLEANUP =================
 def cleanup():
@@ -38,7 +42,7 @@ cleanup()
 # ================= ARIA2 =================
 aria2 = aria2p.API(
     aria2p.Client(
-        host="http://localhost",
+        host=f"http://{ARIA2_HOST}",
         port=ARIA2_PORT,
         secret=ARIA2_SECRET
     )
@@ -54,6 +58,7 @@ GLOBAL_STATE = {
     "TOTAL_UPLOAD_TIME": 0,
     "DOWNLOAD_COUNTER": 1,
     "DOWNLOAD_DIR": DOWNLOAD_DIR,
+    "ENGINE_NAME": ENGINE_NAME,
 }
 
 def time_tracker():
@@ -88,7 +93,7 @@ if __name__ == "__main__":
         print("❌ Aria2 not running! Exiting.\n")
         exit(1)
     
-    print("🤖 Bot is starting...\n")
+    print(f"🤖 Bot is starting... (Upload Engine: {ENGINE_NAME})\n")
 
     # Store bot start time for uptime calculation
     app.start_time = time.time()

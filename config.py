@@ -30,6 +30,31 @@ except ValueError:
 # If you want a runtime connection test, add it in bot.py after aria2 setup.
 
 # =================
+# Upload Engine (Pyrogram-compatible fork)
+# =================
+# Two selectable engines, toggled in requirements.txt:
+#   pyroblack   (default)
+#   wzgram[fast] (rust WarpCrypto backend, faster)
+# Both import as `pyrogram`, so code never changes — only
+# requirements.txt needs a comment swap. Label below is
+# auto-detected from whichever is actually installed;
+# ENGINE_NAME env var can still force an override.
+def _detect_engine():
+    try:
+        from importlib import metadata
+        for pkg, label in (("wzgram", "wzgram[fast]"), ("pyroblack", "Pyroblack")):
+            try:
+                metadata.version(pkg)
+                return label
+            except metadata.PackageNotFoundError:
+                continue
+    except Exception:
+        pass
+    return "Pyroblack"
+
+ENGINE_NAME = get_env_variable("ENGINE_NAME") or _detect_engine()
+
+# =================
 # Bot Operational Settings
 # =================
 DOWNLOAD_DIR = get_env_variable("DOWNLOAD_DIR", "./downloads")

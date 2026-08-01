@@ -21,6 +21,17 @@
 - **❌ Cancellation**: Gracefully cancel active download/upload tasks
 - **🩺 Health Check**: Web endpoint for cloud deployment monitoring
 
+## 🔀 Upload Engine
+
+Two selectable engines, both drop-in `pyrogram` forks — zero code changes to switch:
+
+| Engine | requirements.txt line | Notes |
+|---|---|---|
+| **pyroblack** (default) | `pyroblack` | stable, feature-rich fork |
+| **wzgram[fast]** | `wzgram[fast]` | rust WarpCrypto backend, faster |
+
+Open `requirements.txt`, comment/uncomment the engine you want, redeploy. The bot auto-detects which one is installed and shows it in progress messages — no env var needed (optional `ENGINE_NAME` env var can force a custom label).
+
 ## ⚙️ Prerequisites
 
 - Telegram API credentials (`API_ID` & `API_HASH`)

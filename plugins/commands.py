@@ -96,11 +96,13 @@ async def extract_file(
     """
     import py7zr
     import zipfile
+    import tarfile
 
     fp         = str(file_path)
     ed         = str(extract_dir)
     lower      = fp.lower()
     start_time = time.time()
+    TAR_EXTS   = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
 
     def _send_progress(done, total):
         """Push a live extraction progress message (called from worker thread)."""
@@ -182,10 +184,35 @@ async def extract_file(
         except Exception as e:
             return False, str(e)
 
+    # ── .tar / .tar.gz / .tgz / .tar.bz2 / .tbz2 / .tar.xz / .txz ──────────
+    elif lower.endswith(TAR_EXTS):
+        def _extract_tar():
+            with tarfile.open(fp, "r:*") as tf:
+                members    = tf.getmembers()
+                total      = sum(m.size for m in members)
+                done_bytes = 0
+                last_edit  = 0.0
+
+                for m in members:
+                    tf.extract(m, ed)
+                    done_bytes += m.size
+                    now = time.time()
+                    if now - last_edit >= 3:
+                        last_edit = now
+                        _send_progress(done_bytes, total)
+
+            return True, "Extracted with tarfile."
+
+        try:
+            return await asyncio.to_thread(_extract_tar)
+        except Exception as e:
+            return False, str(e)
+
     else:
         return False, (
             f"Unsupported format: `{os.path.basename(fp)}`\n"
-            "Only `.7z` and `.zip` are supported."
+            "Supported: `.7z` `.zip` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tbz2` `.tar.xz` `.txz`\n"
+            "(`.rar` needs the `unrar` binary — not bundled, add it yourself if needed)"
         )
 
 # --- Upload Progress Function (Runs in a separate thread) ---
@@ -213,7 +240,7 @@ def upload_progress(current, total, gid, start_time, name, parse_mode, loop, dow
         f"┠ Processed: {format_size(current)} of {format_size(total)}\n"
         f"┠ Status: Upload | ETA: {eta_str}\n"
         f"┠ Speed: {format_speed(speed)} | Elapsed: {elapsed_str}\n"
-        f"┠ Engine: Pyrogram v2\n"
+        f"┠ Engine: {GLOBAL_STATE.get('ENGINE_NAME', 'Pyroblack')}\n"
         f"┠ Mode: #Leech | #qBit\n"
         f"┠ User: {user_first} | ID: {user_id}\n"
         f"┖ /cancel{download_index}_{gid}"
@@ -337,8 +364,8 @@ async def start_handler(_, m):
         "┠ To view system stats: `/stats`\n"
         "┖ To cancel an active task: `/cancel<index>_<gid>`\n\n"
         "**📦 Extract Mode (`-e` flag):**\n"
-        "┠ Supports: `.zip` `.rar` `.7z` `.tar` `.gz` `.bz2` `.xz`\n"
-        "┖ Powered by **p7zip** (7z binary)\n\n"
+        "┠ Supports: `.zip` `.7z` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tar.xz`\n"
+        "┖ Powered by **py7zr** / **tarfile** (no `.rar`, needs `unrar` binary)\n\n"
         "**ℹ️ Supported URLs:**\n"
         "┖ Direct file links (HTTP/HTTPS) and Torrent files.\n\n"
         "🚀 Happy Leeching!"
