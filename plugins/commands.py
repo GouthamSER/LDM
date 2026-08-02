@@ -119,7 +119,8 @@ async def reply_message_async(m, text, parse_mode=None, max_retries=3, reply_mar
 
 async def extract_file(
     file_path, extract_dir,
-    msg, name, download_index, user_first, user_id, loop
+    msg, name, download_index, user_first, user_id, loop,
+    progress_gid=None
 ) -> tuple:
     """
     Extracts a .7z or .zip archive using py7zr with live progress UI.
@@ -137,22 +138,11 @@ async def extract_file(
     TAR_EXTS   = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz")
 
     def _send_progress(done, total):
-        """Push a live extraction progress message (called from worker thread)."""
+        """Push live extraction stats into the dashboard (called from worker thread)."""
         elapsed = time.time() - start_time
         speed   = done / elapsed if elapsed > 0 else 0
-        eta     = (total - done) / speed if speed > 0 else 0
-        content = (
-            f"📂 Name: {name}\n"
-            f"{progress_bar(done, total)}\n"
-            f"📦 Processed: {format_size(done)} of {format_size(total)}\n"
-            f"⚙️ Status: Extracting | Engine: py7zr\n"
-            f"🚀 Speed: {format_speed(speed)} | ⏳ ETA: {time_fmt(eta)}\n"
-            f"⏱ Elapsed: {time_fmt(elapsed)}\n"
-            f"🎯 Mode: #Extract | #7zip\n"
-            f"👤 User: {user_first} | ID: {user_id}"
-        )
-        coro = edit_message_async(msg, content, enums.ParseMode.MARKDOWN)
-        asyncio.run_coroutine_threadsafe(coro, loop)
+        if progress_gid and progress_gid in GLOBAL_STATE["ACTIVE"]:
+            GLOBAL_STATE["ACTIVE"][progress_gid]["progress"] = {"done": done, "total": total, "speed": speed}
 
     # ── .7z extraction with py7zr callback ────────────────────────────────
     if lower.endswith(".7z"):
@@ -262,35 +252,8 @@ def upload_progress(current, total, gid, start_time, name, parse_mode, loop, dow
     # edit below is throttled — dashboard reads this directly.
     if gid in GLOBAL_STATE["ACTIVE"]:
         GLOBAL_STATE["ACTIVE"][gid]["progress"] = {"done": current, "total": total, "speed": speed}
-
-    current_time = time.time()
-    if current_time - GLOBAL_STATE["ACTIVE"].get(gid, {}).get("last_edit", 0) < 3:
-        return
-
-    eta = (total - current) / speed if speed > 0 else 0
-    eta_str = time_fmt(eta)
-    elapsed_str = time_fmt(elapsed)
-    progress_bar_output = progress_bar(current, total)
-    
-    new_content = (
-        f"📂 Name: {name}\n"
-        f"{progress_bar_output}\n"
-        f"📦 Processed: {format_size(current)} of {format_size(total)}\n"
-        f"⚙️ Status: Uploading | Engine: {GLOBAL_STATE.get('ENGINE_NAME', 'Pyroblack')}\n"
-        f"🚀 Speed: {format_speed(speed)} | ⏳ ETA: {eta_str}\n"
-        f"⏱ Elapsed: {elapsed_str}\n"
-        f"🎯 Mode: #Leech\n"
-        f"👤 User: {user_first} | ID: {user_id}\n"
-        f"🆔 /cancel{download_index}_{gid}"
-    )
-    
-    msg = GLOBAL_STATE["ACTIVE"][gid]["msg"]
-    try:
-        coro = edit_message_async(msg, new_content, parse_mode)
-        asyncio.run_coroutine_threadsafe(coro, loop)
-        GLOBAL_STATE["ACTIVE"][gid]["last_edit"] = current_time
-    except:
-        pass
+    # Progress is now shown live in the single dashboard message — no more
+    # per-task edit spam here. Only "queued/complete/failed" get an edit.
 
 # --- Upload Handler (Runs in the main event loop) ---
 
@@ -405,10 +368,10 @@ async def start_handler(_, m):
         "┠ To leech a magnet: `/ql <magnet_link>`\n"
         "┠ To leech a .torrent: reply to the file with `/ql`\n"
         "┠ To check active transfers: `/status`\n"
-        "┠ Live auto-refreshing dashboard: `/dashboard` (or `/db`)\n"
         "┠ To view system stats: `/stats`\n"
         "┖ To cancel an active task: `/cancel<index>_<gid>`\n\n"
         "**⚡ Uploads:** up to 4 run in parallel — no waiting on slow files.\n\n"
+        "**📊 Dashboard:** opens automatically on every `/l` or `/ql` — one live message tracks all downloads, uploads, and extractions at once.\n\n"
         "**📦 Extract Mode (`-e` flag):**\n"
         "┠ Supports: `.zip` `.7z` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tar.xz`\n"
         "┖ Powered by **py7zr** / **tarfile** (no `.rar`, needs `unrar` binary)\n\n"
@@ -575,14 +538,16 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
 
     msg = await reply_message_async(
         m,
-        f"🚀 Starting download {download_index}\nGID: `{gid}`",
+        f"🚀 Task {download_index} queued — tracked live in the dashboard below.\nGID: `{gid}`",
         parse_mode=enums.ParseMode.MARKDOWN
     )
+    await _ensure_dashboard(app, m.chat.id)
 
     GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time, "chat_id": m.chat.id}
     GLOBAL_STATE["DOWNLOAD_COUNT"] += 1
 
-    # ── Download progress loop ─────────────────────────────────────────────
+    # ── Download progress loop — dashboard shows live progress, so this
+    # loop just tracks state silently instead of spamming a separate edit. ──
     while not dl.is_complete:
         if GLOBAL_STATE["ACTIVE"].get(gid, {}).get("cancel") or dl.is_removed or dl.has_failed:
             await edit_message_async(msg, f"Download {gid} finished, removed, or failed.", parse_mode=None)
@@ -600,33 +565,6 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
             dl = await asyncio.to_thread(ARIA2_API.get_download, gid)
             GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time, "chat_id": m.chat.id}
             continue
-
-        done  = dl.completed_length
-        total = dl.total_length
-        speed = dl.download_speed
-        eta_sec = dl.eta.total_seconds() if isinstance(dl.eta, timedelta) else dl.eta
-
-        eta_str     = time_fmt(eta_sec)
-        elapsed_str = time_fmt(int(time.time() - start_time))
-
-        if not (dl.is_removed or dl.has_failed):
-            try:
-                await edit_message_async(
-                    msg,
-                    f"📂 Name: {dl.name}\n"
-                    f"{progress_bar(done, total)}\n"
-                    f"📦 Processed: {format_size(done)} of {format_size(total)}\n"
-                    f"⚙️ Status: Downloading | Engine: Aria2 v1.36.0\n"
-                    f"🚀 Speed: {format_speed(speed)} | ⏳ ETA: {eta_str}\n"
-                    f"⏱ Elapsed: {elapsed_str}\n"
-                    f"🎯 Mode: {mode_tag}\n"
-                    f"🌱 Seeders: {getattr(dl, 'num_seeders', 'N/A')} | Leechers: N/A\n"
-                    f"👤 User: {m.from_user.first_name} | ID: {m.from_user.id}\n"
-                    f"🆔 /cancel{download_index}_{gid}",
-                    parse_mode=None
-                )
-            except Exception:
-                pass
 
         await asyncio.sleep(3)
 
@@ -685,22 +623,23 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
         loop = asyncio.get_running_loop()
         await edit_message_async(
             msg,
-            f"📂 Name: {clean_name}\n"
-            f"{progress_bar(0, 1)}\n"
-            f"📦 Processed: 0B of ?\n"
-            f"⚙️ Status: Extracting | Engine: py7zr\n"
-            f"🚀 Speed: -- | ⏳ ETA: --\n"
-            f"⏱ Elapsed: 0s\n"
-            f"🎯 Mode: #Extract | #7zip\n"
-            f"👤 User: {m.from_user.first_name} | ID: {m.from_user.id}",
+            f"🗜️ Extracting **{clean_name}**... tracked in the dashboard below.",
             parse_mode=enums.ParseMode.MARKDOWN
         )
+        GLOBAL_STATE["ACTIVE"][gid] = {
+            "cancel": False, "chat_id": m.chat.id,
+            "name": clean_name, "kind": "🗜️ EX",
+            "progress": {"done": 0, "total": 1, "speed": 0}
+        }
+        await _ensure_dashboard(app, m.chat.id)
 
         success, extract_msg = await extract_file(
             file_path, extract_dir,
             msg, clean_name, download_index,
-            m.from_user.first_name, m.from_user.id, loop
+            m.from_user.first_name, m.from_user.id, loop,
+            progress_gid=gid
         )
+        GLOBAL_STATE["ACTIVE"].pop(gid, None)
 
         # Always delete the original archive after extraction attempt
         if os.path.exists(file_path):
@@ -753,24 +692,19 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
             extracted_size = os.path.getsize(extracted_path)
             sub_gid        = f"{gid}_ex{idx}"
 
-            file_msg = await reply_message_async(
-                m,
-                f"⬆️ Queued **{idx}/{len(extracted_files)}**: `{extracted_name}`\n"
-                f"Size: {format_size(extracted_size)}",
-                parse_mode=enums.ParseMode.MARKDOWN
-            )
-
             GLOBAL_STATE["ACTIVE"][sub_gid] = {
                 "cancel":      False,
                 "file_path":   extracted_path,
                 "name":        extracted_name,
+                "kind":        "⬆️ UL",
+                "progress":    {"done": 0, "total": extracted_size, "speed": 0},
                 "last_edit":   0,
-                "msg":         file_msg,
+                "msg":         msg,           # shared parent msg — no per-file spam
                 "extract_dir": extract_dir,   # so cancel can nuke the whole folder
                 "base_gid":    gid,           # so cancel can kill all siblings
                 "chat_id":     m.chat.id
             }
-            upload_jobs.append((extracted_path, extracted_name, extracted_size, sub_gid, file_msg))
+            upload_jobs.append((extracted_path, extracted_name, extracted_size, sub_gid, msg))
 
         # ── Fire all uploads concurrently — UPLOAD_SEMAPHORE caps it at 4
         # actually running at once; the rest queue automatically. No more
@@ -805,8 +739,7 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
     # ══════════════════════════════════════════════════════════════════════
     await edit_message_async(
         msg,
-        f"✅ Download complete! Starting upload of **{clean_name}**\n"
-        f"To cancel upload, use `/cancel{download_index}_{gid}`",
+        f"✅ Download complete! Uploading **{clean_name}**... tracked in the dashboard below.",
         parse_mode=enums.ParseMode.MARKDOWN
     )
 
@@ -814,10 +747,13 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
         "cancel":    False,
         "file_path": file_path,
         "name":      clean_name,
+        "kind":      "⬆️ UL",
+        "progress":  {"done": 0, "total": file_size, "speed": 0},
         "last_edit": 0,
         "msg":       msg,
         "chat_id":   m.chat.id
     }
+    await _ensure_dashboard(app, m.chat.id)
     loop = asyncio.get_running_loop()
     asyncio.create_task(
         upload_file(
@@ -953,21 +889,23 @@ DASH_REFRESH_INTERVAL = 5  # seconds
 
 
 def _dashboard_tasks(chat_id):
-    """Snapshot of all active DL/UL tasks for this chat, newest first excluded (insertion order)."""
+    """Snapshot of all active DL/UL/Extract tasks for this chat (insertion order)."""
     tasks = []
     for gid, info in list(GLOBAL_STATE["ACTIVE"].items()):
         if info.get("chat_id") != chat_id:
             continue
-        if "file_path" in info:
-            # Upload task — live stats pushed by upload_progress()
+
+        if "kind" in info:
+            # Generic stored-progress entry — covers uploads AND extraction,
+            # both push live stats into info["progress"] as they run.
             prog = info.get("progress") or {}
             tasks.append({
-                "gid": gid, "kind": "⬆️ UL", "name": info.get("name", "?"),
+                "gid": gid, "kind": info["kind"], "name": info.get("name", "?"),
                 "done": prog.get("done", 0), "total": prog.get("total", 0),
                 "speed": prog.get("speed", 0)
             })
         else:
-            # Download task — query aria2 live
+            # Plain download task, not yet tagged — query aria2 live
             try:
                 dl = ARIA2_API.get_download(gid)
                 if dl.is_complete or dl.is_removed or dl.has_failed:
@@ -1017,17 +955,14 @@ def render_dashboard(chat_id, page):
     return "\n".join(lines), keyboard, page
 
 
-async def dashboard_handler(app, m: Message):
-    """/dashboard or /db — opens (or reuses) the single auto-refreshing dashboard for this chat."""
-    chat_id = m.chat.id
+async def _ensure_dashboard(app, chat_id):
+    """Auto-opens the single dashboard for this chat if not already running — no command needed."""
     existing = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
     if existing and existing.get("running"):
-        return await reply_message_async(
-            m, "📊 Dashboard already running above — use its buttons to navigate.", parse_mode=None
-        )
+        return
 
     text, keyboard, page = render_dashboard(chat_id, 0)
-    msg = await reply_message_async(m, text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
+    msg = await app.send_message(chat_id, text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
     GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 0, "running": True}
     asyncio.create_task(_dashboard_loop(app, chat_id))
 
@@ -1192,10 +1127,6 @@ def register_handlers(app, aria2_api, state_vars):
     @app.on_message(filters.command("status"))
     async def status_wrapper(client, message):
         await status_handler(client, message)
-
-    @app.on_message(filters.command(["dashboard", "db"]))
-    async def dashboard_wrapper(client, message):
-        await dashboard_handler(client, message)
 
     @app.on_message(filters.command("stats"))
     async def stats_wrapper(client, message):
