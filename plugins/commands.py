@@ -78,6 +78,15 @@ def clean_filename(name):
         cleaned = base.strip(" -_.") or base
     return f"{cleaned}{ext}"
 
+
+def _extract_rename_flag(args):
+    """Pull `-n <new name>` (rest of args joined, so spaces work) out of an arg list."""
+    if "-n" not in args:
+        return args, None
+    idx = args.index("-n")
+    rename_to = " ".join(args[idx + 1:]).strip() or None
+    return args[:idx], rename_to
+
 # --- Async Helper Functions ---
 
 async def edit_message_async(msg, content, parse_mode, max_retries=3, reply_markup=None):
@@ -241,16 +250,22 @@ async def extract_file(
 
 def upload_progress(current, total, gid, start_time, name, parse_mode, loop, download_index, user_first, user_id):
     if total == 0: return
-    
+
     if GLOBAL_STATE["ACTIVE"].get(gid, {}).get("cancel", False):
         raise Exception("Upload manually cancelled by user.")
-    
+
+    elapsed = time.time() - start_time
+    speed = current / elapsed if elapsed > 0 else 0
+
+    # Store live stats for the dashboard even when the per-task message
+    # edit below is throttled — dashboard reads this directly.
+    if gid in GLOBAL_STATE["ACTIVE"]:
+        GLOBAL_STATE["ACTIVE"][gid]["progress"] = {"done": current, "total": total, "speed": speed}
+
     current_time = time.time()
     if current_time - GLOBAL_STATE["ACTIVE"].get(gid, {}).get("last_edit", 0) < 3:
         return
-    
-    elapsed = time.time() - start_time
-    speed = current / elapsed if elapsed > 0 else 0
+
     eta = (total - current) / speed if speed > 0 else 0
     eta_str = time_fmt(eta)
     elapsed_str = time_fmt(elapsed)
@@ -385,9 +400,11 @@ async def start_handler(_, m):
         "**📚 How to Use Me:**\n"
         "┠ To start a download: `/l <Direct_URL>`\n"
         "┠ To leech & extract: `/l <Direct_URL> -e`\n"
+        "┠ To rename while leeching: `/l <Direct_URL> -n <new name>`\n"
         "┠ To leech a magnet: `/ql <magnet_link>`\n"
         "┠ To leech a .torrent: reply to the file with `/ql`\n"
         "┠ To check active transfers: `/status`\n"
+        "┠ Live auto-refreshing dashboard: `/dashboard` (or `/db`)\n"
         "┠ To view system stats: `/stats`\n"
         "┖ To cancel an active task: `/cancel<index>_<gid>`\n\n"
         "**⚡ Uploads:** up to 4 run in parallel — no waiting on slow files.\n\n"
@@ -407,14 +424,17 @@ async def leech_handler(app, m: Message):
         return await reply_message_async(
             m,
             "Usage:\n"
-            "`/l <direct_url>`        — Leech and upload\n"
-            "`/l <direct_url> -e`     — Leech, extract (7zip), then upload all files",
+            "`/l <direct_url>`             — Leech and upload\n"
+            "`/l <direct_url> -e`          — Leech, extract (7zip), then upload all files\n"
+            "`/l <direct_url> -n <name>`   — Leech and rename before upload",
             parse_mode=enums.ParseMode.MARKDOWN
         )
 
     args = m.command[1:]          # Everything after /l
     extract_mode = "-e" in args
-    url_parts = [a for a in args if a != "-e"]
+    args = [a for a in args if a != "-e"]
+    args, rename_to = _extract_rename_flag(args)
+    url_parts = args
 
     if not url_parts:
         return await reply_message_async(m, "❌ No URL provided.", parse_mode=None)
@@ -437,7 +457,8 @@ async def leech_handler(app, m: Message):
 
     await _process_task(
         app, m, dl, gid, extract_mode,
-        mode_tag="#Extract | #7zip" if extract_mode else "#Leech | #Aria2"
+        mode_tag="#Extract | #7zip" if extract_mode else "#Leech | #Aria2",
+        rename_to=rename_to
     )
 
 
@@ -448,7 +469,9 @@ async def ql_handler(app, m: Message):
     """
     args = m.command[1:] if len(m.command) > 1 else []
     extract_mode = "-e" in args
-    text_parts = [a for a in args if a != "-e"]
+    args = [a for a in args if a != "-e"]
+    args, rename_to = _extract_rename_flag(args)
+    text_parts = args
 
     torrent_path   = None
     magnet_uri     = text_parts[0] if text_parts else None
@@ -471,9 +494,10 @@ async def ql_handler(app, m: Message):
         return await reply_message_async(
             m,
             "Usage:\n"
-            "`/ql <magnet_link>`        — Leech a magnet link\n"
-            "`/ql <magnet_link> -e`     — Leech magnet, extract, then upload\n"
-            "Reply to a `.torrent` file with `/ql` (or `/ql -e`) to leech it",
+            "`/ql <magnet_link>`            — Leech a magnet link\n"
+            "`/ql <magnet_link> -e`         — Leech magnet, extract, then upload\n"
+            "`/ql <magnet_link> -n <name>`  — Leech magnet and rename before upload\n"
+            "Reply to a `.torrent` file with `/ql` (or `/ql -e` / `/ql -n <name>`) to leech it",
             parse_mode=enums.ParseMode.MARKDOWN
         )
 
@@ -498,11 +522,12 @@ async def ql_handler(app, m: Message):
 
     await _process_task(
         app, m, dl, gid, extract_mode,
-        mode_tag="#Extract | #Torrent" if extract_mode else "#Leech | #Magnet"
+        mode_tag="#Extract | #Torrent" if extract_mode else "#Leech | #Magnet",
+        rename_to=rename_to
     )
 
 
-async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag):
+async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename_to=None):
     """
     Shared tail: progress-tracks an already-added aria2 download (URL, magnet,
     or .torrent) through completion, then extracts (optional) and uploads.
@@ -519,7 +544,7 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag):
         parse_mode=enums.ParseMode.MARKDOWN
     )
 
-    GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time}
+    GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time, "chat_id": m.chat.id}
     GLOBAL_STATE["DOWNLOAD_COUNT"] += 1
 
     # ── Download progress loop ─────────────────────────────────────────────
@@ -538,7 +563,7 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag):
             GLOBAL_STATE["ACTIVE"].pop(gid, None)
             gid = new_gid
             dl = await asyncio.to_thread(ARIA2_API.get_download, gid)
-            GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time}
+            GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time, "chat_id": m.chat.id}
             continue
 
         done  = dl.completed_length
@@ -595,9 +620,15 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag):
     except Exception:
         return await edit_message_async(msg, "❌ File corrupted or empty.", parse_mode=None)
 
-    # ── Clean junk site-tag prefixes from the filename ──────────────────────
+    # ── Rename: explicit -n name wins, else auto-clean site-tag junk ────────
     original_name = os.path.basename(file_path)
-    clean_name = clean_filename(original_name)
+    if rename_to:
+        _, orig_ext = os.path.splitext(original_name)
+        new_base, new_ext = os.path.splitext(rename_to)
+        clean_name = rename_to if new_ext else f"{rename_to}{orig_ext}"
+    else:
+        clean_name = clean_filename(original_name)
+
     if clean_name != original_name:
         new_path = os.path.join(os.path.dirname(file_path), clean_name)
         try:
@@ -701,7 +732,8 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag):
                 "last_edit":   0,
                 "msg":         file_msg,
                 "extract_dir": extract_dir,   # so cancel can nuke the whole folder
-                "base_gid":    gid            # so cancel can kill all siblings
+                "base_gid":    gid,           # so cancel can kill all siblings
+                "chat_id":     m.chat.id
             }
             upload_jobs.append((extracted_path, extracted_name, extracted_size, sub_gid, file_msg))
 
@@ -748,7 +780,8 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag):
         "file_path": file_path,
         "name":      clean_name,
         "last_edit": 0,
-        "msg":       msg
+        "msg":       msg,
+        "chat_id":   m.chat.id
     }
     loop = asyncio.get_running_loop()
     asyncio.create_task(
@@ -876,6 +909,138 @@ async def status_callback_handler(app, cq: CallbackQuery):
             await cq.answer("Status message could not be refreshed (too old or unchanged).", show_alert=False)
 
 
+# ================= DASHBOARD (WZML-X style) =================
+# One single message per chat, auto-refreshing, paginated, with
+# Prev/Next/Refresh/Close buttons — replaces spamming a message per task.
+
+DASH_PAGE_SIZE        = 3
+DASH_REFRESH_INTERVAL = 5  # seconds
+
+
+def _dashboard_tasks(chat_id):
+    """Snapshot of all active DL/UL tasks for this chat, newest first excluded (insertion order)."""
+    tasks = []
+    for gid, info in list(GLOBAL_STATE["ACTIVE"].items()):
+        if info.get("chat_id") != chat_id:
+            continue
+        if "file_path" in info:
+            # Upload task — live stats pushed by upload_progress()
+            prog = info.get("progress") or {}
+            tasks.append({
+                "gid": gid, "kind": "⬆️ UL", "name": info.get("name", "?"),
+                "done": prog.get("done", 0), "total": prog.get("total", 0),
+                "speed": prog.get("speed", 0)
+            })
+        else:
+            # Download task — query aria2 live
+            try:
+                dl = ARIA2_API.get_download(gid)
+                if dl.is_complete or dl.is_removed or dl.has_failed:
+                    continue
+                tasks.append({
+                    "gid": gid, "kind": "⬇️ DL", "name": dl.name,
+                    "done": dl.completed_length, "total": dl.total_length,
+                    "speed": dl.download_speed
+                })
+            except Exception:
+                continue
+    return tasks
+
+
+def render_dashboard(chat_id, page):
+    tasks = _dashboard_tasks(chat_id)
+    total_tasks = len(tasks)
+    total_pages = max(1, (total_tasks + DASH_PAGE_SIZE - 1) // DASH_PAGE_SIZE)
+    page = max(0, min(page, total_pages - 1))
+    page_tasks = tasks[page * DASH_PAGE_SIZE: page * DASH_PAGE_SIZE + DASH_PAGE_SIZE]
+
+    lines = ["📊 **Dashboard**", "─" * 22]
+    if not page_tasks:
+        lines.append("✅ No active tasks.")
+    else:
+        for t in page_tasks:
+            lines.append(f"{t['kind']} **{t['name']}**")
+            lines.append(f"  {progress_bar(t['done'], t['total'])}")
+            lines.append(
+                f"  {format_size(t['done'])}/{format_size(t['total'])} • "
+                f"{format_speed(t['speed'])} • `/cancel_{t['gid']}`"
+            )
+    lines.append("─" * 22)
+    lines.append(
+        f"Page {page + 1}/{total_pages} • Tasks: {total_tasks} • "
+        f"DL: {GLOBAL_STATE.get('DOWNLOAD_COUNT', 0)} UL: {GLOBAL_STATE.get('UPLOAD_COUNT', 0)}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⬅️ Prev", callback_data="dash_prev"),
+            InlineKeyboardButton("🔄 Refresh", callback_data="dash_refresh"),
+            InlineKeyboardButton("Next ➡️", callback_data="dash_next"),
+        ],
+        [InlineKeyboardButton("❌ Close", callback_data="dash_close")]
+    ])
+    return "\n".join(lines), keyboard, page
+
+
+async def dashboard_handler(app, m: Message):
+    """/dashboard or /db — opens (or reuses) the single auto-refreshing dashboard for this chat."""
+    chat_id = m.chat.id
+    existing = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
+    if existing and existing.get("running"):
+        return await reply_message_async(
+            m, "📊 Dashboard already running above — use its buttons to navigate.", parse_mode=None
+        )
+
+    text, keyboard, page = render_dashboard(chat_id, 0)
+    msg = await reply_message_async(m, text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
+    GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 0, "running": True}
+    asyncio.create_task(_dashboard_loop(app, chat_id))
+
+
+async def _dashboard_loop(app, chat_id):
+    """Background auto-refresh — edits the single dashboard message every few seconds."""
+    while True:
+        entry = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
+        if not entry or not entry.get("running"):
+            return
+        text, keyboard, page = render_dashboard(chat_id, entry["page"])
+        entry["page"] = page
+        await edit_message_async(entry["msg"], text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
+        await asyncio.sleep(DASH_REFRESH_INTERVAL)
+
+
+async def dashboard_callback_handler(app, cq: CallbackQuery):
+    chat_id = cq.message.chat.id
+    entry = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
+    if not entry:
+        return await cq.answer("Dashboard expired — run /dashboard again.", show_alert=True)
+
+    if cq.data == "dash_close":
+        entry["running"] = False
+        GLOBAL_STATE["DASHBOARDS"].pop(chat_id, None)
+        try:
+            await cq.edit_message_text("📊 Dashboard closed. Run /dashboard to reopen.")
+        except Exception:
+            pass
+        return await cq.answer("Closed.")
+
+    if cq.data == "dash_prev":
+        entry["page"] = max(0, entry["page"] - 1)
+    elif cq.data == "dash_next":
+        entry["page"] += 1
+    # dash_refresh: page unchanged, just re-render
+
+    text, keyboard, page = render_dashboard(chat_id, entry["page"])
+    entry["page"] = page
+    try:
+        await cq.edit_message_text(text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
+        await cq.answer()
+    except FloodWait as e:
+        await cq.answer(f"Flood control: {e.value}s", show_alert=True)
+    except Exception:
+        await cq.answer()
+
+
 async def stats_handler(app, m: Message):
     # ── 1. System Stats (Subprocess) ──────────────────────────────────────
     cpu_percent = "N/A"
@@ -976,7 +1141,8 @@ def register_handlers(app, aria2_api, state_vars):
     # --- Handlers that only need default args (client, message/callback) ---
     app.on_message(filters.command("start"))(start_handler)
     app.on_message(filters.regex(r"^/cancel"))(cancel_handler)
-    app.on_callback_query()(status_callback_handler)
+    app.on_callback_query(filters.regex("^status_"))(status_callback_handler)
+    app.on_callback_query(filters.regex("^dash_"))(dashboard_callback_handler)
 
     # --- Handlers that take (app, message) args (using wrappers) ---
 
@@ -991,6 +1157,10 @@ def register_handlers(app, aria2_api, state_vars):
     @app.on_message(filters.command("status"))
     async def status_wrapper(client, message):
         await status_handler(client, message)
+
+    @app.on_message(filters.command(["dashboard", "db"]))
+    async def dashboard_wrapper(client, message):
+        await dashboard_handler(client, message)
 
     @app.on_message(filters.command("stats"))
     async def stats_wrapper(client, message):

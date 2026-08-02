@@ -59,6 +59,7 @@ GLOBAL_STATE = {
     "DOWNLOAD_COUNTER": 1,
     "DOWNLOAD_DIR": DOWNLOAD_DIR,
     "ENGINE_NAME": ENGINE_NAME,
+    "DASHBOARDS": {},   # chat_id -> {"msg": Message, "page": int, "running": bool}
 }
 
 def time_tracker():
