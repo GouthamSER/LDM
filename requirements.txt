@@ -4,7 +4,7 @@
 # code, zero code changes needed to switch).
 # ============================================================
 pyroblack
-# wzgram[fast]     # rust WarpCrypto backend, install this instead for max speed
+wzgram[fast]     # rust WarpCrypto backend, install this instead for max speed
 
 TgCrypto
 aria2p
