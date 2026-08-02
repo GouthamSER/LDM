@@ -36,6 +36,9 @@ aria2c \
     --min-split-size=1M \
     --file-allocation=trunc \
     --disk-cache=64M \
+    --enable-dht=true \
+    --dht-listen-port=6881-6999 \
+    --bt-enable-lpd=true \
     --log-level=info \
     --log=aria2.log &
 

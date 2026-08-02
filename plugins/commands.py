@@ -22,8 +22,9 @@ UPLOAD_SEMAPHORE = asyncio.Semaphore(4)
 # --- Helper Functions ---
 
 def progress_bar(done, total, size=12):
-    FILLED = "■" 
-    EMPTY = "□"
+    # WZML-X classic style: solid block for filled, light shade for empty
+    FILLED = "█"
+    EMPTY = "░"
     if total == 0:
         return f"[{EMPTY * size}] 0.00%"
     percent = min(100.0, (done / total) * 100)
@@ -141,14 +142,14 @@ async def extract_file(
         speed   = done / elapsed if elapsed > 0 else 0
         eta     = (total - done) / speed if speed > 0 else 0
         content = (
-            f"{download_index}. {name}\n"
-            f"┃ {progress_bar(done, total)}\n"
-            f"┠ Processed: {format_size(done)} of {format_size(total)}\n"
-            f"┠ Status: Extracting | ETA: {time_fmt(eta)}\n"
-            f"┠ Speed: {format_speed(speed)} | Elapsed: {time_fmt(elapsed)}\n"
-            f"┠ Engine: py7zr\n"
-            f"┠ Mode: #Extract | #7zip\n"
-            f"┠ User: {user_first} | ID: {user_id}"
+            f"📂 Name: {name}\n"
+            f"{progress_bar(done, total)}\n"
+            f"📦 Processed: {format_size(done)} of {format_size(total)}\n"
+            f"⚙️ Status: Extracting | Engine: py7zr\n"
+            f"🚀 Speed: {format_speed(speed)} | ⏳ ETA: {time_fmt(eta)}\n"
+            f"⏱ Elapsed: {time_fmt(elapsed)}\n"
+            f"🎯 Mode: #Extract | #7zip\n"
+            f"👤 User: {user_first} | ID: {user_id}"
         )
         coro = edit_message_async(msg, content, enums.ParseMode.MARKDOWN)
         asyncio.run_coroutine_threadsafe(coro, loop)
@@ -272,15 +273,15 @@ def upload_progress(current, total, gid, start_time, name, parse_mode, loop, dow
     progress_bar_output = progress_bar(current, total)
     
     new_content = (
-        f"{download_index}. {name}\n"
-        f"┃ {progress_bar_output}\n"
-        f"┠ Processed: {format_size(current)} of {format_size(total)}\n"
-        f"┠ Status: Upload | ETA: {eta_str}\n"
-        f"┠ Speed: {format_speed(speed)} | Elapsed: {elapsed_str}\n"
-        f"┠ Engine: {GLOBAL_STATE.get('ENGINE_NAME', 'Pyroblack')}\n"
-        f"┠ Mode: #Leech | #qBit\n"
-        f"┠ User: {user_first} | ID: {user_id}\n"
-        f"┖ /cancel{download_index}_{gid}"
+        f"📂 Name: {name}\n"
+        f"{progress_bar_output}\n"
+        f"📦 Processed: {format_size(current)} of {format_size(total)}\n"
+        f"⚙️ Status: Uploading | Engine: {GLOBAL_STATE.get('ENGINE_NAME', 'Pyroblack')}\n"
+        f"🚀 Speed: {format_speed(speed)} | ⏳ ETA: {eta_str}\n"
+        f"⏱ Elapsed: {elapsed_str}\n"
+        f"🎯 Mode: #Leech\n"
+        f"👤 User: {user_first} | ID: {user_id}\n"
+        f"🆔 /cancel{download_index}_{gid}"
     )
     
     msg = GLOBAL_STATE["ACTIVE"][gid]["msg"]
@@ -504,11 +505,45 @@ async def ql_handler(app, m: Message):
     if magnet_uri and not magnet_uri.startswith("magnet:"):
         return await reply_message_async(m, "❌ Not a valid magnet link (must start with `magnet:`).", parse_mode=enums.ParseMode.MARKDOWN)
 
+    # Extra public trackers = more peers found faster, especially for
+    # magnets with few/no trackers of their own (udp + http + wss mix).
+    EXTRA_TRACKERS = ",".join([
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.tracker.cl:1337/announce",
+        "udp://tracker.openbittorrent.com:6969/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://explodie.org:6969/announce",
+        "udp://tracker.dler.org:6969/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker-udp.gbitt.info:80/announce",
+        "udp://tracker.theoks.net:6969/announce",
+        "udp://tracker.bittor.pw:1337/announce",
+        "udp://ipv4.tracker.harry.lu:80/announce",
+        "udp://opentracker.i2p.rocks:6969/announce",
+        "udp://tracker.moeking.me:6969/announce",
+        "udp://tracker.zerobytes.xyz:1337/announce",
+        "udp://retracker01-msk-virt.corbina.net:80/announce",
+        "http://tracker.openbittorrent.com:80/announce",
+        "http://tracker.opentrackr.org:1337/announce",
+        "https://tracker.gbitt.info:443/announce",
+        "https://tracker.tamersunion.org:443/announce",
+        "wss://tracker.openwebtorrent.com",
+        "wss://tracker.btorrent.xyz",
+    ])
+
     options = {
         "dir": GLOBAL_STATE["DOWNLOAD_DIR"],
         "max-connection-per-server": "4",
         "seed-time": "0",
-        "bt-stop-timeout": "600"
+        "bt-stop-timeout": "600",
+        "bt-tracker": EXTRA_TRACKERS,
+        "bt-tracker-connect-timeout": "10",
+        "bt-tracker-timeout": "10",
+        "enable-dht": "true",
+        "enable-peer-exchange": "true",
+        "bt-max-peers": "200",
+        "bt-request-peer-speed-limit": "50M",
     }
 
     try:
@@ -578,16 +613,16 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
             try:
                 await edit_message_async(
                     msg,
-                    f"{download_index}. {dl.name}\n"
-                    f"┃ {progress_bar(done, total)}\n"
-                    f"┠ Processed: {format_size(done)} of {format_size(total)}\n"
-                    f"┠ Status: Download | ETA: {eta_str}\n"
-                    f"┠ Speed: {format_speed(speed)} | Elapsed: {elapsed_str}\n"
-                    f"┠ Engine: Aria2 v1.36.0\n"
-                    f"┠ Mode: {mode_tag}\n"
-                    f"┠ Seeders: {getattr(dl, 'num_seeders', 'N/A')} | Leechers: N/A\n"
-                    f"┠ User: {m.from_user.first_name} | ID: {m.from_user.id}\n"
-                    f"┖ /cancel{download_index}_{gid}",
+                    f"📂 Name: {dl.name}\n"
+                    f"{progress_bar(done, total)}\n"
+                    f"📦 Processed: {format_size(done)} of {format_size(total)}\n"
+                    f"⚙️ Status: Downloading | Engine: Aria2 v1.36.0\n"
+                    f"🚀 Speed: {format_speed(speed)} | ⏳ ETA: {eta_str}\n"
+                    f"⏱ Elapsed: {elapsed_str}\n"
+                    f"🎯 Mode: {mode_tag}\n"
+                    f"🌱 Seeders: {getattr(dl, 'num_seeders', 'N/A')} | Leechers: N/A\n"
+                    f"👤 User: {m.from_user.first_name} | ID: {m.from_user.id}\n"
+                    f"🆔 /cancel{download_index}_{gid}",
                     parse_mode=None
                 )
             except Exception:
@@ -650,14 +685,14 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
         loop = asyncio.get_running_loop()
         await edit_message_async(
             msg,
-            f"{download_index}. {clean_name}\n"
-            f"┃ {progress_bar(0, 1)}\n"
-            f"┠ Processed: 0B of ?\n"
-            f"┠ Status: Extracting | ETA: --\n"
-            f"┠ Speed: -- | Elapsed: 0s\n"
-            f"┠ Engine: py7zr\n"
-            f"┠ Mode: #Extract | #7zip\n"
-            f"┠ User: {m.from_user.first_name} | ID: {m.from_user.id}",
+            f"📂 Name: {clean_name}\n"
+            f"{progress_bar(0, 1)}\n"
+            f"📦 Processed: 0B of ?\n"
+            f"⚙️ Status: Extracting | Engine: py7zr\n"
+            f"🚀 Speed: -- | ⏳ ETA: --\n"
+            f"⏱ Elapsed: 0s\n"
+            f"🎯 Mode: #Extract | #7zip\n"
+            f"👤 User: {m.from_user.first_name} | ID: {m.from_user.id}",
             parse_mode=enums.ParseMode.MARKDOWN
         )
 
