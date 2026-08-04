@@ -4,6 +4,7 @@ import os
 import time
 import asyncio
 import subprocess
+import html as _html
 from datetime import timedelta
 
 # NOTE: We need InlineKeyboardMarkup and InlineKeyboardButton for /status
@@ -21,18 +22,20 @@ UPLOAD_SEMAPHORE = asyncio.Semaphore(4)
 
 # --- Helper Functions ---
 
-def progress_bar(done, total, size=12):
-    # WZML-X classic style: solid block for filled, light shade for empty
-    FILLED = "█"
-    EMPTY = "░"
+def progress_bar(done, total, size=13):
+    # Matches the WZML-X-style reference look: solid filled cells, one
+    # distinct "leading edge" cell, rest empty.
+    FILLED, CURRENT, EMPTY = "■", "▨", "░"
     if total == 0:
         return f"[{EMPTY * size}] 0.00%"
     percent = min(100.0, (done / total) * 100)
-    filled_count = int(percent / 100 * size)
-    if percent > 0 and filled_count == 0 and size > 0: filled_count = 1
-    if filled_count > size: filled_count = size
-    empty_count = size - filled_count
-    bar = FILLED * filled_count + EMPTY * empty_count
+    filled = int(percent / 100 * size)
+    if filled >= size:
+        bar = FILLED * size
+    elif percent <= 0:
+        bar = EMPTY * size
+    else:
+        bar = FILLED * filled + CURRENT + EMPTY * (size - filled - 1)
     return f"[{bar}] {percent:.2f}%"
 
 def time_fmt(sec):
@@ -536,14 +539,13 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
 
     start_time = time.time()
 
-    msg = await reply_message_async(
-        m,
-        f"🚀 Task {download_index} queued — tracked live in the dashboard below.\nGID: `{gid}`",
-        parse_mode=enums.ParseMode.MARKDOWN
-    )
     await _ensure_dashboard(app, m.chat.id)
+    msg = GLOBAL_STATE["DASHBOARDS"][m.chat.id]["msg"]   # reuse dashboard msg for rare one-off edits
 
-    GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time, "chat_id": m.chat.id}
+    GLOBAL_STATE["ACTIVE"][gid] = {
+        "cancel": False, "start_time": start_time, "chat_id": m.chat.id,
+        "user_first": m.from_user.first_name, "user_id": m.from_user.id, "mode_tag": mode_tag
+    }
     GLOBAL_STATE["DOWNLOAD_COUNT"] += 1
 
     # ── Download progress loop — dashboard shows live progress, so this
@@ -563,7 +565,10 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
             GLOBAL_STATE["ACTIVE"].pop(gid, None)
             gid = new_gid
             dl = await asyncio.to_thread(ARIA2_API.get_download, gid)
-            GLOBAL_STATE["ACTIVE"][gid] = {"cancel": False, "start_time": start_time, "chat_id": m.chat.id}
+            GLOBAL_STATE["ACTIVE"][gid] = {
+                "cancel": False, "start_time": start_time, "chat_id": m.chat.id,
+                "user_first": m.from_user.first_name, "user_id": m.from_user.id, "mode_tag": mode_tag
+            }
             continue
 
         await asyncio.sleep(3)
@@ -621,17 +626,16 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
         os.makedirs(extract_dir, exist_ok=True)
 
         loop = asyncio.get_running_loop()
-        await edit_message_async(
-            msg,
-            f"🗜️ Extracting **{clean_name}**... tracked in the dashboard below.",
-            parse_mode=enums.ParseMode.MARKDOWN
-        )
         GLOBAL_STATE["ACTIVE"][gid] = {
             "cancel": False, "chat_id": m.chat.id,
             "name": clean_name, "kind": "🗜️ EX",
-            "progress": {"done": 0, "total": 1, "speed": 0}
+            "progress": {"done": 0, "total": 1, "speed": 0},
+            "start_time": time.time(),
+            "user_first": m.from_user.first_name, "user_id": m.from_user.id,
+            "mode_tag": mode_tag
         }
         await _ensure_dashboard(app, m.chat.id)
+        msg = GLOBAL_STATE["DASHBOARDS"][m.chat.id]["msg"]
 
         success, extract_msg = await extract_file(
             file_path, extract_dir,
@@ -702,7 +706,9 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
                 "msg":         msg,           # shared parent msg — no per-file spam
                 "extract_dir": extract_dir,   # so cancel can nuke the whole folder
                 "base_gid":    gid,           # so cancel can kill all siblings
-                "chat_id":     m.chat.id
+                "chat_id":     m.chat.id,
+                "start_time":  time.time(),
+                "user_first":  m.from_user.first_name, "user_id": m.from_user.id
             }
             upload_jobs.append((extracted_path, extracted_name, extracted_size, sub_gid, msg))
 
@@ -737,12 +743,6 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
     # ══════════════════════════════════════════════════════════════════════
     # NORMAL UPLOAD (no -e flag)
     # ══════════════════════════════════════════════════════════════════════
-    await edit_message_async(
-        msg,
-        f"✅ Download complete! Uploading **{clean_name}**... tracked in the dashboard below.",
-        parse_mode=enums.ParseMode.MARKDOWN
-    )
-
     GLOBAL_STATE["ACTIVE"][gid] = {
         "cancel":    False,
         "file_path": file_path,
@@ -751,9 +751,12 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
         "progress":  {"done": 0, "total": file_size, "speed": 0},
         "last_edit": 0,
         "msg":       msg,
-        "chat_id":   m.chat.id
+        "chat_id":   m.chat.id,
+        "start_time": time.time(),
+        "user_first": m.from_user.first_name, "user_id": m.from_user.id
     }
     await _ensure_dashboard(app, m.chat.id)
+    msg = GLOBAL_STATE["DASHBOARDS"][m.chat.id]["msg"]
     loop = asyncio.get_running_loop()
     asyncio.create_task(
         upload_file(
@@ -899,13 +902,20 @@ def _dashboard_tasks(chat_id):
             # Generic stored-progress entry — covers uploads AND extraction,
             # both push live stats into info["progress"] as they run.
             prog = info.get("progress") or {}
+            kind = info["kind"]
             tasks.append({
-                "gid": gid, "kind": info["kind"], "name": info.get("name", "?"),
+                "gid": gid, "kind": kind, "name": info.get("name", "?"),
                 "done": prog.get("done", 0), "total": prog.get("total", 0),
-                "speed": prog.get("speed", 0)
+                "speed": prog.get("speed", 0),
+                "status": "Upload" if kind == "⬆️ UL" else "Extract",
+                "engine": GLOBAL_STATE.get("ENGINE_NAME", "Pyroblack") if kind == "⬆️ UL" else "pExtract v2",
+                "mode_suffix": " (Unzip)" if kind == "🗜️ EX" else "",
+                "start_time": info.get("start_time", time.time()),
+                "user_first": info.get("user_first", "?"),
+                "user_id": info.get("user_id", "?"),
             })
         else:
-            # Plain download task, not yet tagged — query aria2 live
+            # Plain download task — query aria2 live
             try:
                 dl = ARIA2_API.get_download(gid)
                 if dl.is_complete or dl.is_removed or dl.has_failed:
@@ -913,36 +923,94 @@ def _dashboard_tasks(chat_id):
                 tasks.append({
                     "gid": gid, "kind": "⬇️ DL", "name": dl.name,
                     "done": dl.completed_length, "total": dl.total_length,
-                    "speed": dl.download_speed
+                    "speed": dl.download_speed,
+                    "status": "Download",
+                    "engine": "Aria2 v1.36.0",
+                    "mode_suffix": "",
+                    "start_time": info.get("start_time", time.time()),
+                    "user_first": info.get("user_first", "?"),
+                    "user_id": info.get("user_id", "?"),
                 })
             except Exception:
                 continue
     return tasks
 
 
-def render_dashboard(chat_id, page):
+async def _get_system_stats(app):
+    """Cheap live system snapshot for the Bot Stats block."""
+    cpu, ram, free_disk, free_pct = "N/A", "N/A", "N/A", "N/A"
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run, ["sh", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'"],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0:
+            cpu = f"{float(r.stdout.strip()):.1f}"
+    except Exception:
+        pass
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run, ["sh", "-c", "free -m | awk 'NR==2{printf \"%.1f\", $3*100/$2}'"],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0:
+            ram = r.stdout.strip()
+    except Exception:
+        pass
+    try:
+        r = await asyncio.to_thread(
+            subprocess.run, ["df", "-BG", "--output=avail,pcent", GLOBAL_STATE["DOWNLOAD_DIR"]],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0:
+            lines = r.stdout.strip().split("\n")
+            if len(lines) > 1:
+                parts = lines[1].split()
+                if len(parts) >= 2:
+                    free_disk = parts[0].replace("G", "")
+                    free_pct  = parts[1].replace("%", "")
+    except Exception:
+        pass
+    uptime_str = time_fmt(time.time() - getattr(app, "start_time", time.time()))
+    return cpu, ram, free_disk, free_pct, uptime_str
+
+
+async def render_dashboard(app, chat_id, page):
     tasks = _dashboard_tasks(chat_id)
     total_tasks = len(tasks)
     total_pages = max(1, (total_tasks + DASH_PAGE_SIZE - 1) // DASH_PAGE_SIZE)
     page = max(0, min(page, total_pages - 1))
     page_tasks = tasks[page * DASH_PAGE_SIZE: page * DASH_PAGE_SIZE + DASH_PAGE_SIZE]
 
-    lines = ["📊 **Dashboard**", "─" * 22]
+    dl_speed_total = sum(t["speed"] for t in tasks if t["kind"] == "⬇️ DL")
+    ul_speed_total = sum(t["speed"] for t in tasks if t["kind"] == "⬆️ UL")
+
+    lines = []
     if not page_tasks:
         lines.append("✅ No active tasks.")
     else:
         for t in page_tasks:
-            lines.append(f"{t['kind']} **{t['name']}**")
-            lines.append(f"  {progress_bar(t['done'], t['total'])}")
-            lines.append(
-                f"  {format_size(t['done'])}/{format_size(t['total'])} • "
-                f"{format_speed(t['speed'])} • `/cancel_{t['gid']}`"
-            )
-    lines.append("─" * 22)
-    lines.append(
-        f"Page {page + 1}/{total_pages} • Tasks: {total_tasks} • "
-        f"DL: {GLOBAL_STATE.get('DOWNLOAD_COUNT', 0)} UL: {GLOBAL_STATE.get('UPLOAD_COUNT', 0)}"
-    )
+            name = _html.escape(t["name"])
+            elapsed = time_fmt(int(time.time() - t["start_time"]))
+            eta_sec = (t["total"] - t["done"]) / t["speed"] if t["speed"] > 0 else 0
+            lines.append(f"<b>{name}</b>")
+            lines.append(f"   {progress_bar(t['done'], t['total'])}")
+            lines.append(f"├ <b>Processed:</b> {format_size(t['done'])} of {format_size(t['total'])}")
+            lines.append(f"├ <b>Status:</b> {t['status']} | <b>ETA:</b> {time_fmt(eta_sec)}")
+            lines.append(f"├ <b>Speed:</b> {format_speed(t['speed'])} | <b>Elapsed:</b> {elapsed}")
+            lines.append(f"├ <b>Engine:</b> {t['engine']}")
+            lines.append(f"├ <b>Mode:</b>  #Leech{t['mode_suffix']} | #Aria2")
+            lines.append(f"├ <b>User:</b> {_html.escape(str(t['user_first']))} | <b>ID:</b> {t['user_id']}")
+            lines.append(f"└ /cancel_{t['gid']}")
+            lines.append("")
+
+    cpu, ram, free_disk, free_pct, uptime_str = await _get_system_stats(app)
+    lines.append("⬡ <b>Bot Stats</b>")
+    lines.append(f"├ <b>CPU:</b> {cpu}% | <b>F:</b> {free_disk}GB [{free_pct}%]")
+    lines.append(f"├ <b>RAM:</b> {ram}% | <b>UPTIME:</b> {uptime_str}")
+    lines.append(f"└ <b>DL:</b> {format_speed(dl_speed_total)} | <b>UL:</b> {format_speed(ul_speed_total)}")
+    lines.append("")
+    lines.append(f"<b>PAGES</b> {page + 1}/{total_pages}")
 
     keyboard = InlineKeyboardMarkup([
         [
@@ -961,8 +1029,8 @@ async def _ensure_dashboard(app, chat_id):
     if existing and existing.get("running"):
         return
 
-    text, keyboard, page = render_dashboard(chat_id, 0)
-    msg = await app.send_message(chat_id, text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
+    text, keyboard, page = await render_dashboard(app, chat_id, 0)
+    msg = await app.send_message(chat_id, text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
     GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 0, "running": True}
     asyncio.create_task(_dashboard_loop(app, chat_id))
 
@@ -973,9 +1041,9 @@ async def _dashboard_loop(app, chat_id):
         entry = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
         if not entry or not entry.get("running"):
             return
-        text, keyboard, page = render_dashboard(chat_id, entry["page"])
+        text, keyboard, page = await render_dashboard(app, chat_id, entry["page"])
         entry["page"] = page
-        await edit_message_async(entry["msg"], text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
+        await edit_message_async(entry["msg"], text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
         await asyncio.sleep(DASH_REFRESH_INTERVAL)
 
 
@@ -983,13 +1051,13 @@ async def dashboard_callback_handler(app, cq: CallbackQuery):
     chat_id = cq.message.chat.id
     entry = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
     if not entry:
-        return await cq.answer("Dashboard expired — run /dashboard again.", show_alert=True)
+        return await cq.answer("Dashboard expired — start a new /l or /ql.", show_alert=True)
 
     if cq.data == "dash_close":
         entry["running"] = False
         GLOBAL_STATE["DASHBOARDS"].pop(chat_id, None)
         try:
-            await cq.edit_message_text("📊 Dashboard closed. Run /dashboard to reopen.")
+            await cq.edit_message_text("📊 Dashboard closed.")
         except Exception:
             pass
         return await cq.answer("Closed.")
@@ -1000,10 +1068,10 @@ async def dashboard_callback_handler(app, cq: CallbackQuery):
         entry["page"] += 1
     # dash_refresh: page unchanged, just re-render
 
-    text, keyboard, page = render_dashboard(chat_id, entry["page"])
+    text, keyboard, page = await render_dashboard(app, chat_id, entry["page"])
     entry["page"] = page
     try:
-        await cq.edit_message_text(text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
+        await cq.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
         await cq.answer()
     except FloodWait as e:
         await cq.answer(f"Flood control: {e.value}s", show_alert=True)
