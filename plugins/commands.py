@@ -539,7 +539,7 @@ async def _process_task(app, m: Message, dl, gid, extract_mode, mode_tag, rename
 
     start_time = time.time()
 
-    await _ensure_dashboard(app, m.chat.id)
+    await _ensure_dashboard(app, m.chat.id, force_new=True)
     msg = GLOBAL_STATE["DASHBOARDS"][m.chat.id]["msg"]   # reuse dashboard msg for rare one-off edits
 
     GLOBAL_STATE["ACTIVE"][gid] = {
@@ -862,25 +862,13 @@ async def cancel_handler(_, m: Message):
 
 
 async def status_handler(app, m: Message):
-    """Handles the /status command, showing all active tasks."""
-    status_text = await asyncio.to_thread(get_all_active_status, app)
-    keyboard = get_status_keyboard()
-    await reply_message_async(m, status_text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
+    """/status now spawns a fresh dashboard message (same tree-style, auto-refreshing)."""
+    await _ensure_dashboard(app, m.chat.id, force_new=True)
 
 
 async def status_callback_handler(app, cq: CallbackQuery):
-    """Handles the callback query from the Refresh button."""
-    if cq.data == "status_refresh":
-        new_status_text = await asyncio.to_thread(get_all_active_status, app)
-        keyboard = get_status_keyboard()
-        
-        try:
-            await cq.edit_message_text(new_status_text, parse_mode=enums.ParseMode.MARKDOWN, reply_markup=keyboard)
-            await cq.answer("Status refreshed successfully!")
-        except FloodWait as e:
-            await cq.answer(f"Flood control: Try again in {e.value}s.", show_alert=True)
-        except Exception:
-            await cq.answer("Status message could not be refreshed (too old or unchanged).", show_alert=False)
+    """Legacy no-op — status now uses the dash_ callback family via dashboard_callback_handler."""
+    await cq.answer()
 
 
 # ================= DASHBOARD (WZML-X style) =================
@@ -1023,23 +1011,38 @@ async def render_dashboard(app, chat_id, page):
     return "\n".join(lines), keyboard, page
 
 
-async def _ensure_dashboard(app, chat_id):
-    """Auto-opens the single dashboard for this chat if not already running — no command needed."""
+async def _ensure_dashboard(app, chat_id, force_new=False):
+    """
+    Auto-opens the dashboard for this chat.
+    - force_new=False (default, used for mid-task refreshes): reuse the
+      currently running dashboard if there is one.
+    - force_new=True (used when a brand new /l, /ql, or /status comes in):
+      freeze the old dashboard message in place (stop refreshing it, strip
+      its buttons, but NEVER delete it) and pop a fresh one under the new command.
+    """
     existing = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
+
     if existing and existing.get("running"):
-        return
+        if not force_new:
+            return
+        existing["running"] = False  # old loop sees gen mismatch next tick and stops itself
+        try:
+            await existing["msg"].edit_reply_markup(reply_markup=None)  # remove buttons, leave text as final state
+        except Exception:
+            pass
 
     text, keyboard, page = await render_dashboard(app, chat_id, 0)
     msg = await app.send_message(chat_id, text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
-    GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 0, "running": True}
-    asyncio.create_task(_dashboard_loop(app, chat_id))
+    gen = time.time()
+    GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 0, "running": True, "gen": gen}
+    asyncio.create_task(_dashboard_loop(app, chat_id, gen))
 
 
-async def _dashboard_loop(app, chat_id):
-    """Background auto-refresh — edits the single dashboard message every few seconds."""
+async def _dashboard_loop(app, chat_id, gen):
+    """Background auto-refresh — stops itself if superseded by a newer dashboard (gen mismatch)."""
     while True:
         entry = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
-        if not entry or not entry.get("running"):
+        if not entry or not entry.get("running") or entry.get("gen") != gen:
             return
         text, keyboard, page = await render_dashboard(app, chat_id, entry["page"])
         entry["page"] = page
