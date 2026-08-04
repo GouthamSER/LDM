@@ -3,7 +3,8 @@
 # Both are drop-in pyrogram forks (same `from pyrogram import`
 # code, zero code changes needed to switch).
 # ============================================================
-wzgram[fast]     # rust WarpCrypto backend, install this instead for max speed
+pyroblack
+# wzgram[fast]     # rust WarpCrypto backend, install this instead for max speed
 
 TgCrypto
 aria2p
