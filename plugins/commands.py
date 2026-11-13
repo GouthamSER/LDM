@@ -269,7 +269,7 @@ async def upload_file(app, msg, file_path, name, file_size, loop, gid, download_
             await app.send_document(
                 msg.chat.id, 
                 file_path,
-                caption=f"✅ **{name}**\nSize: {format_size(file_size)}",
+                caption=f"**{name}**\nSize: {format_size(file_size)}",
                 progress=upload_progress, 
                 progress_args=(gid, time.time(), name, enums.ParseMode.MARKDOWN, loop, download_index, user_first, user_id)
             )
