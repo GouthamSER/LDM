@@ -59,6 +59,7 @@ GLOBAL_STATE = {
     "DOWNLOAD_COUNTER": 1,
     "DOWNLOAD_DIR": DOWNLOAD_DIR,
     "ENGINE_NAME": ENGINE_NAME,
+    "ARIA_VER": "?",
     "DASHBOARDS": {},   # chat_id -> {"msg": Message, "page": int, "running": bool}
 }
 
@@ -89,9 +90,14 @@ register_handlers(app, aria2, GLOBAL_STATE)
 if __name__ == "__main__":
     try:
         aria2.get_stats()
-        print("✅ Aria2 connected on port 6801!\n")
-    except:
-        print("❌ Aria2 not running! Exiting.\n")
+        try:
+            ver = aria2.client.get_version()
+            GLOBAL_STATE["ARIA_VER"] = ver.get("version", "?") if isinstance(ver, dict) else str(ver)
+        except Exception:
+            GLOBAL_STATE["ARIA_VER"] = "?"
+        print(f"✅ Aria2 {GLOBAL_STATE['ARIA_VER']} connected on port {ARIA2_PORT}!\n")
+    except Exception as e:
+        print(f"❌ Aria2 not running! ({e}) Exiting.\n")
         exit(1)
     
     print(f"🤖 Bot is starting... (Upload Engine: {ENGINE_NAME})\n")

@@ -1,15 +1,10 @@
-# ============================================================
-# Upload Engine — pick ONE, comment out the other.
-# Both are drop-in pyrogram forks (same `from pyrogram import`
-# code, zero code changes needed to switch).
-# ============================================================
-
-wzgram[fast]     # rust WarpCrypto backend, install this instead for max speed
+# Upload engine: drop-in pyrogram fork (rust WarpCrypto backend)
+wzgram[fast]
 
 TgCrypto
 aria2p
-aria2
 aiohttp
+aioqbt
 uvicorn
 starlette
 py7zr

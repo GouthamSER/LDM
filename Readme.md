@@ -32,11 +32,38 @@ Two selectable engines, both drop-in `pyrogram` forks — zero code changes to s
 
 Open `requirements.txt`, comment/uncomment the engine you want, redeploy. The bot auto-detects which one is installed and shows it in progress messages — no env var needed (optional `ENGINE_NAME` env var can force a custom label).
 
+## 🧲 qBittorrent engine (new)
+
+`/qb <magnet | .torrent URL>` or reply to a `.torrent` file with `/qb`. Uses a local **qBittorrent 5.x** (`qbittorrent-nox`, started by `start.sh`) through its WebUI API (`aioqbt`). Aria2 stays for direct links (`/l`) and `/ql`.
+
+- Low-RAM libtorrent profile (POSIX disk IO, small caches) — safe on 512MB hosts
+- Multi-file torrents: **every** file is uploaded (old code uploaded only the first)
+- Duplicate / leftover torrent auto-cleanup, dead-magnet timeout (10 min), disk-space check before download
+- Works with `-e` (extract) and `-n <name>` (rename, single-file torrents)
+
+## 🆕 Other additions
+
+| Feature | Notes |
+|---|---|
+| Access control | `OWNER_ID`, `AUTH_USERS`, `AUTH_CHATS` (open only while `OWNER_ID` is the placeholder) |
+| Upload retry | FloodWait + network errors retried (10s / 20s backoff) |
+| Auto split | Files over `SPLIT_SIZE` (default 1.95GiB) upload as `.001 .002 …` |
+| Caption template | `LEECH_CAPTION` — `{filename}` `{size}`, HTML allowed |
+| Dump chat | `LEECH_DUMP` — upload to another chat/channel |
+| Reply-to-link | `/l` `/ql` `/qb` work when replying to a message containing a link |
+| Completion report | Task size, time taken, mode, files uploaded, failures |
+| `/cancelall`, `/ping`, `/help` | owner cancel-all, latency |
+| Dashboard | stops refreshing when idle; shows seeders/peers; real engine versions |
+
+## 🔧 Extra environment variables
+
+`QBIT_HOST` `QBIT_PORT` (8090) `QBIT_USERNAME` `QBIT_PASSWORD` · `AUTH_USERS` `AUTH_CHATS` · `MAX_UPLOADS` · `SPLIT_SIZE` · `LEECH_CAPTION` · `LEECH_DUMP`
+
 ## ⚙️ Prerequisites
 
 - Telegram API credentials (`API_ID` & `API_HASH`)
 - Telegram Bot Token (`BOT_TOKEN`)
-- Running **Aria2 RPC** daemon
+- Running **Aria2 RPC** daemon and **qbittorrent-nox** (both started by `start.sh`)
 - Python 3.10+ environment
 
 ## 🛠️ Deployment Options

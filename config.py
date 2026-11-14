@@ -63,3 +63,42 @@ SESSION_NAME = get_env_variable("SESSION_NAME", "ariadwd")
 
 # Web/Health Check Port (used in the provided bot.py and plugins.weblive)
 HEALTH_PORT = int(get_env_variable("PORT", 8000))
+
+# =================
+# qBittorrent (WebUI, local qbittorrent-nox started by start.sh)
+# =================
+QBIT_HOST     = get_env_variable("QBIT_HOST", "127.0.0.1")
+QBIT_PORT     = int(get_env_variable("QBIT_PORT", 8090))
+QBIT_USERNAME = get_env_variable("QBIT_USERNAME", "")   # empty = localhost auth bypass (start.sh default)
+QBIT_PASSWORD = get_env_variable("QBIT_PASSWORD", "")
+
+# =================
+# Access control
+# =================
+# OWNER_ID is always allowed. Add more users / groups as comma lists.
+# While OWNER_ID is still the 123456789 placeholder the bot stays open to
+# everyone (so a fresh deploy works); set a real OWNER_ID to lock it down.
+def _id_list(name):
+    out = []
+    for x in str(get_env_variable(name, "")).replace(" ", "").split(","):
+        try:
+            out.append(int(x))
+        except ValueError:
+            pass
+    return out
+
+AUTH_USERS = _id_list("AUTH_USERS")
+AUTH_CHATS = _id_list("AUTH_CHATS")
+
+# =================
+# Upload behaviour
+# =================
+# Parallel Telegram uploads
+MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 4))
+# Files bigger than this are split into .001 .002 ... parts (bytes).
+# Default 1.95GiB (safe for the 2GB bot limit). Premium uploader: 3.9GiB. 0 = never split.
+SPLIT_SIZE = int(get_env_variable("SPLIT_SIZE", int(1.95 * 1024**3)))
+# Caption template. Placeholders: {filename} {size} {mode}. HTML allowed.
+LEECH_CAPTION = get_env_variable("LEECH_CAPTION", "<b>{filename}</b>\n<code>{size}</code>")
+# Leech into this chat instead of the command chat (0 = same chat). Optional dump channel.
+LEECH_DUMP = int(get_env_variable("LEECH_DUMP", 0))

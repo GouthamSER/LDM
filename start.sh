@@ -1,62 +1,66 @@
 #!/bin/bash
 
-# --- Check for Aria2 installation ---
-if ! command -v aria2c &> /dev/null
-then
-    echo "❌ ERROR: aria2c command not found. Please install Aria2."
-    exit 1
-fi
-# ------------------------------------
+for bin in aria2c qbittorrent-nox; do
+  if ! command -v "$bin" &> /dev/null; then
+    echo "❌ ERROR: $bin not found."; exit 1
+  fi
+done
 
-# Kill everything first
-echo "🔪 Killing all Aria2 and freeing ports..."
+echo "🔪 Killing old aria2 / qBittorrent and freeing ports..."
 pkill -9 -f aria2c || true
-fuser -k 6800/tcp 6801/tcp || true
-sleep 3
+pkill -9 -f qbittorrent-nox || true
+fuser -k 6800/tcp 6801/tcp 8090/tcp || true
+sleep 2
 
-# Cleanup
 rm -rf downloads aria2.log aria2.session
 mkdir -p downloads
 
-# Respect ARIA2_SECRET env var (falls back to default if unset)
 ARIA2_SECRET=${ARIA2_SECRET:-gjxdml}
+ARIA2_HOST=${ARIA2_HOST:-localhost}
+QBIT_PORT=${QBIT_PORT:-8090}
 
-# Start Aria2 on port 6801 ONLY (foreground for stability)
+# ---------- qBittorrent (WebUI on localhost only, auth bypass for 127.0.0.1) ----------
+QPROF="$PWD/.qbit"
+rm -rf "$QPROF"; mkdir -p "$QPROF/qBittorrent/config"
+cat > "$QPROF/qBittorrent/config/qBittorrent.conf" <<QCONF
+[LegalNotice]
+Accepted=true
+
+[Preferences]
+WebUI\\Address=127.0.0.1
+WebUI\\Port=${QBIT_PORT}
+WebUI\\LocalHostAuth=false
+WebUI\\CSRFProtection=false
+WebUI\\HostHeaderValidation=false
+Downloads\\SavePath=$PWD/downloads
+QCONF
+echo "🚀 Starting qBittorrent on 127.0.0.1:${QBIT_PORT}..."
+qbittorrent-nox --profile="$QPROF" --confirm-legal-notice > qbit.log 2>&1 &
+
+# ---------- Aria2 ----------
 echo "🚀 Starting Aria2 on port 6801..."
 aria2c \
-    --enable-rpc \
-    --rpc-listen-all=true \
-    --rpc-allow-origin-all=true \
-    --rpc-secret="${ARIA2_SECRET}" \
-    --rpc-listen-port=6801 \
-    --disable-ipv6 \
-    --dir=downloads \
-    --max-connection-per-server=16 \
-    --split=16 \
-    --min-split-size=1M \
-    --file-allocation=trunc \
-    --disk-cache=64M \
-    --enable-dht=true \
-    --dht-listen-port=6881-6999 \
-    --bt-enable-lpd=true \
-    --log-level=info \
-    --log=aria2.log &
+    --enable-rpc --rpc-listen-all=true --rpc-allow-origin-all=true \
+    --rpc-secret="${ARIA2_SECRET}" --rpc-listen-port=6801 \
+    --disable-ipv6 --dir=downloads \
+    --max-connection-per-server=16 --split=16 --min-split-size=1M \
+    --file-allocation=trunc --disk-cache=64M \
+    --enable-dht=true --dht-listen-port=6881-6999 --bt-enable-lpd=true \
+    --listen-port=6881-6999 \
+    --log-level=info --log=aria2.log &
 
-sleep 8  # Increased slightly for stability
+# wait (max ~30s) for both APIs
+for i in $(seq 1 30); do
+  A=0; Q=0
+  curl -s -f -X POST -d "{\"jsonrpc\":\"2.0\",\"id\":\"t\",\"method\":\"aria2.getVersion\",\"params\":[\"token:${ARIA2_SECRET}\"]}" "http://${ARIA2_HOST}:6801/jsonrpc" >/dev/null 2>&1 && A=1
+  curl -s -f "http://127.0.0.1:${QBIT_PORT}/api/v2/app/version" >/dev/null 2>&1 && Q=1
+  [ "$A" = 1 ] && [ "$Q" = 1 ] && break
+  sleep 1
+done
 
-# Test connection with proper POST (using ARIA2_HOST env var, default to localhost)
-ARIA2_HOST=${ARIA2_HOST:-localhost}
-echo "🔍 Testing Aria2 RPC on ${ARIA2_HOST}:6801..."
-if curl -s -f -X POST -d "{\"jsonrpc\":\"2.0\",\"id\":\"test\",\"method\":\"aria2.getVersion\",\"params\":[\"token:${ARIA2_SECRET}\"]}" http://${ARIA2_HOST}:6801/jsonrpc >/dev/null 2>&1; then
-    echo "✅ Aria2 READY!"
-    python bot.py
-else
-    echo "❌ Aria2 FAILED on ${ARIA2_HOST}:6801. Check logs for details."
-    echo "Manual test command: curl -X POST -d '{\"jsonrpc\":\"2.0\",\"method\":\"aria2.getVersion\",\"params\":[\"token:${ARIA2_SECRET}\"]}' http://${ARIA2_HOST}:6801/jsonrpc"
-    if [ -f "aria2.log" ]; then
-        tail -20 aria2.log
-    else
-        echo "Aria2 log file (aria2.log) was not created."
-    fi
-    exit 1
+if [ "$A" != 1 ]; then
+  echo "❌ Aria2 FAILED on ${ARIA2_HOST}:6801"; tail -20 aria2.log 2>/dev/null; exit 1
 fi
+[ "$Q" = 1 ] && echo "✅ qBittorrent READY!" || { echo "⚠️ qBittorrent not up — /qb disabled. Log:"; tail -10 qbit.log; }
+echo "✅ Aria2 READY!"
+exec python bot.py
