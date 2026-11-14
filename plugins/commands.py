@@ -459,7 +459,7 @@ async def start_handler(_, m):
         "┠ Magnet / .torrent via **Aria2**: `/ql <magnet>` or reply to a `.torrent` with `/ql`\n"
         "┠ Reply to a message containing a link with `/l` or `/qb`\n"
         "┠ Active transfers: `/status`\n"
-        "┠ Upload type (Document / Video) + thumbnail: `/settings`, `/setthumb`, `/delthumb`\n"
+        "┠ Upload type (Document / Video) + thumbnail: `/settings` (`/st`), `/setthumb`, `/delthumb`\n┠ Leech dump chat: `/setdump <chat_id|here>`, `/deldump`\n"
         "┠ System stats: `/stats`  •  Latency: `/ping`\n"
         "┠ Cancel one task: `/cancel_<gid>`\n"
         "┖ Cancel everything (owner): `/cancelall`\n\n"
@@ -892,7 +892,7 @@ async def _run_task(app, m, gid, tracker, extract_mode, mode_tag, rename_to, eng
 
 async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, rename_to, dl_name, start_time):
     first, uid = _who(m)
-    target_chat = config.LEECH_DUMP or m.chat.id
+    target_chat = (await us.get(uid))["dump"] or config.LEECH_DUMP or m.chat.id
     cleanup = list(cleanup)
 
     # ── 1. validate downloaded files ───────────────────────────────────────
@@ -1349,8 +1349,10 @@ def _settings_view(prefs):
         "⚙️ <b>Upload Settings</b>\n"
         f"┠ Upload as: <b>{'🎬 Video' if mode == 'video' else '📄 Document'}</b>\n"
         f"┠ Thumbnail: <b>{'✅ set' if prefs['thumb'] else '❌ none (auto from video)'}</b>\n"
+        f"┠ Leech dump: <b>{('<code>%s</code>' % prefs['dump']) if prefs['dump'] else ('<code>%s</code> (global)' % config.LEECH_DUMP if config.LEECH_DUMP else '❌ none (same chat)')}</b>\n"
         f"┖ Saved in: <b>{us.backend()}</b>\n\n"
-        "Set thumb: reply to a photo with /setthumb"
+        "Thumb: reply to a photo with /setthumb\n"
+        "Dump: /setdump &lt;chat_id&gt; (or /setdump here inside the group/channel)"
     )
     rows = [[
         InlineKeyboardButton(("✅ " if mode == "doc" else "") + "📄 Document", callback_data="us_doc"),
@@ -1359,6 +1361,8 @@ def _settings_view(prefs):
     if prefs["thumb"]:
         rows.append([InlineKeyboardButton("🖼 View thumb", callback_data="us_view"),
                      InlineKeyboardButton("🗑 Delete thumb", callback_data="us_del")])
+    if prefs["dump"]:
+        rows.append([InlineKeyboardButton("🗑 Clear dump", callback_data="us_deldump")])
     rows.append([InlineKeyboardButton("❌ Close", callback_data="us_close")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -1400,6 +1404,41 @@ async def delthumb_handler(_, m: Message):
     await reply_message_async(m, "🗑 Thumbnail deleted.", parse_mode=None)
 
 
+async def setdump_handler(app, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+    _, uid = _who(m)
+    arg = m.command[1] if len(m.command) > 1 else ""
+    if arg.lower() in ("here", "this"):
+        chat_id = m.chat.id
+    else:
+        try:
+            chat_id = int(arg)
+        except ValueError:
+            return await reply_message_async(
+                m, "Usage: `/setdump <chat_id>` (e.g. `-1001234567890`) or `/setdump here` inside the target group/channel.\n"
+                   "Bot must be admin there. `/deldump` to clear.", parse_mode=enums.ParseMode.MARKDOWN)
+    try:   # prove the bot can post there before saving
+        probe = await app.send_message(chat_id, "✅ Leech dump set.")
+        try:
+            await probe.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        return await reply_message_async(m, f"❌ Bot can't post in `{chat_id}`: {e}\nAdd the bot as admin first.",
+                                         parse_mode=enums.ParseMode.MARKDOWN)
+    await us.set_dump(uid, chat_id)
+    await reply_message_async(m, f"✅ Leech dump set to `{chat_id}`. Your uploads go there.", parse_mode=enums.ParseMode.MARKDOWN)
+
+
+async def deldump_handler(_, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+    _, uid = _who(m)
+    await us.set_dump(uid, 0)
+    await reply_message_async(m, "🗑 Leech dump cleared.", parse_mode=None)
+
+
 async def settings_callback_handler(app, cq: CallbackQuery):
     uid = cq.from_user.id
     prefs = await us.get(uid)
@@ -1419,6 +1458,8 @@ async def settings_callback_handler(app, cq: CallbackQuery):
         await us.set_mode(uid, "video")
     elif cq.data == "us_del":
         await us.del_thumb(uid)
+    elif cq.data == "us_deldump":
+        await us.set_dump(uid, 0)
     text, kb = _settings_view(await us.get(uid))
     try:
         await cq.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=kb)
@@ -1441,9 +1482,11 @@ def register_handlers(app, aria2_api, state_vars):
     app.on_callback_query(filters.regex("^status_"))(status_callback_handler)
     app.on_callback_query(filters.regex("^dash_"))(dashboard_callback_handler)
     app.on_callback_query(filters.regex("^us_"))(settings_callback_handler)
-    app.on_message(filters.command(["settings", "usettings"]))(settings_handler)
+    app.on_message(filters.command(["settings", "usettings", "st"]))(settings_handler)
     app.on_message(filters.command("setthumb"))(setthumb_handler)
     app.on_message(filters.command("delthumb"))(delthumb_handler)
+    app.on_message(filters.command("setdump"))(setdump_handler)
+    app.on_message(filters.command("deldump"))(deldump_handler)
 
     @app.on_message(filters.command(["l", "leech"]))
     async def leech_wrapper(client, message):

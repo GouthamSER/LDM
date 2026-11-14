@@ -72,13 +72,14 @@ async def get(uid):
     """-> {"mode": "doc"|"video", "thumb": path|None}"""
     if uid in _cache:
         return _cache[uid]
-    mode, thumb = "doc", None
+    mode, thumb, dump = "doc", None, 0
     col = _collection()
     try:
         if col is not None:
             d = await col.find_one({"_id": uid})
             if d:
                 mode = d.get("mode", "doc")
+                dump = int(d.get("dump", 0) or 0)
                 if d.get("thumb"):
                     os.makedirs(THUMB_DIR, exist_ok=True)
                     p = _thumb_path(uid)
@@ -86,12 +87,13 @@ async def get(uid):
                     thumb = p
         else:
             async with _json_lock:
-                mode = (await _json_read()).get(str(uid), {}).get("mode", "doc")
+                rec = (await _json_read()).get(str(uid), {})
+            mode, dump = rec.get("mode", "doc"), int(rec.get("dump", 0) or 0)
             if os.path.exists(_thumb_path(uid)):
                 thumb = _thumb_path(uid)
     except Exception as e:
         print(f"⚠️ settings load failed for {uid}: {e}")
-    _cache[uid] = {"mode": mode, "thumb": thumb}
+    _cache[uid] = {"mode": mode, "thumb": thumb, "dump": dump}
     return _cache[uid]
 
 
@@ -107,6 +109,12 @@ async def _save(uid, **fields):
                 await _json_write(data)
     except Exception as e:
         print(f"⚠️ settings save failed for {uid}: {e}")
+
+
+async def set_dump(uid, chat_id):
+    """chat_id 0 = clear (upload back into the command chat)."""
+    (await get(uid))["dump"] = int(chat_id)
+    await _save(uid, dump=int(chat_id))
 
 
 async def set_mode(uid, mode):
