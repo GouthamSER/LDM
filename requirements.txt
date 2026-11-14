@@ -8,3 +8,5 @@ aioqbt
 uvicorn
 starlette
 py7zr
+motor
+Pillow

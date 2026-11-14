@@ -102,3 +102,10 @@ SPLIT_SIZE = int(get_env_variable("SPLIT_SIZE", int(1.95 * 1024**3)))
 LEECH_CAPTION = get_env_variable("LEECH_CAPTION", "<b>{filename}</b>\n<code>{size}</code>")
 # Leech into this chat instead of the command chat (0 = same chat). Optional dump channel.
 LEECH_DUMP = int(get_env_variable("LEECH_DUMP", 0))
+
+# =================
+# MongoDB (per-user settings: upload type + thumbnail). Optional.
+# Empty = settings fall back to a local JSON file (lost on ephemeral hosts like Koyeb).
+# =================
+DATABASE_URL  = get_env_variable("DATABASE_URL", "")
+DATABASE_NAME = get_env_variable("DATABASE_NAME", "ldmbot")

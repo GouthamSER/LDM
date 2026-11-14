@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 import config
 from plugins import qbit as qb
+from plugins import usersettings as us
 
 # ================= Global State and Helpers (Placeholders to be set by bot.py) =================
 GLOBAL_STATE = {}
@@ -352,7 +353,7 @@ def split_file(path, part_size, chunk=8 * 1024 * 1024):
 
 # ================= UPLOAD =================
 
-async def _send_with_retry(app, chat_id, path, gid, offset, total, caption):
+async def _send_with_retry(app, chat_id, path, gid, offset, total, caption, kind="doc", thumb=None, extra=None):
     """send_document with progress, FloodWait handling and 2 retries on network
     errors (10s, 20s backoff). Cancel is honoured immediately."""
     start = time.time()
@@ -368,9 +369,14 @@ async def _send_with_retry(app, chat_id, path, gid, offset, total, caption):
     delays = [10, 20]
     for attempt in range(len(delays) + 1):
         try:
+            if kind == "video":
+                return await app.send_video(
+                    chat_id, path, caption=caption, parse_mode=enums.ParseMode.HTML,
+                    thumb=thumb, progress=progress, **(extra or {})
+                )
             return await app.send_document(
                 chat_id, path, caption=caption, parse_mode=enums.ParseMode.HTML,
-                progress=progress
+                thumb=thumb, progress=progress
             )
         except FloodWait as e:
             await asyncio.sleep(e.value + 1)
@@ -403,11 +409,24 @@ async def upload_file(app, target_chat, file_path, name, file_size, gid):
 
             total = sum(os.path.getsize(p) for p in parts)
             offset = 0
+            prefs = await us.get(entry.get("user_id", 0))
             for part in parts:
                 psize = os.path.getsize(part)
                 pname = name if len(parts) == 1 else os.path.basename(part)
-                await _send_with_retry(app, target_chat, part, gid, offset, total,
-                                       make_caption(pname, psize))
+                kind, thumb, extra, auto_thumb = "doc", prefs["thumb"], None, None
+                # video mode: only for whole (unsplit) video files — split parts aren't playable
+                if prefs["mode"] == "video" and len(parts) == 1 and us.is_video(part):
+                    dur, w, h = await us.probe_video(part)
+                    if not thumb:
+                        auto_thumb = thumb = await us.make_thumb(part, dur)
+                    kind = "video"
+                    extra = {"duration": int(dur), "width": w, "height": h, "supports_streaming": True}
+                try:
+                    await _send_with_retry(app, target_chat, part, gid, offset, total,
+                                           make_caption(pname, psize), kind, thumb, extra)
+                finally:
+                    if auto_thumb:
+                        await asyncio.to_thread(_rm_path, auto_thumb)
                 offset += psize
             ok = True
         except Exception as e:
@@ -440,6 +459,7 @@ async def start_handler(_, m):
         "┠ Magnet / .torrent via **Aria2**: `/ql <magnet>` or reply to a `.torrent` with `/ql`\n"
         "┠ Reply to a message containing a link with `/l` or `/qb`\n"
         "┠ Active transfers: `/status`\n"
+        "┠ Upload type (Document / Video) + thumbnail: `/settings`, `/setthumb`, `/delthumb`\n"
         "┠ System stats: `/stats`  •  Latency: `/ping`\n"
         "┠ Cancel one task: `/cancel_<gid>`\n"
         "┖ Cancel everything (owner): `/cancelall`\n\n"
@@ -1320,6 +1340,93 @@ async def stats_handler(app, m: Message):
     await reply_message_async(m, text, parse_mode=enums.ParseMode.HTML)
 
 
+
+# ================= USER SETTINGS (upload type + thumbnail) =================
+
+def _settings_view(prefs):
+    mode = prefs["mode"]
+    text = (
+        "⚙️ <b>Upload Settings</b>\n"
+        f"┠ Upload as: <b>{'🎬 Video' if mode == 'video' else '📄 Document'}</b>\n"
+        f"┠ Thumbnail: <b>{'✅ set' if prefs['thumb'] else '❌ none (auto from video)'}</b>\n"
+        f"┖ Saved in: <b>{us.backend()}</b>\n\n"
+        "Set thumb: reply to a photo with /setthumb"
+    )
+    rows = [[
+        InlineKeyboardButton(("✅ " if mode == "doc" else "") + "📄 Document", callback_data="us_doc"),
+        InlineKeyboardButton(("✅ " if mode == "video" else "") + "🎬 Video", callback_data="us_vid"),
+    ]]
+    if prefs["thumb"]:
+        rows.append([InlineKeyboardButton("🖼 View thumb", callback_data="us_view"),
+                     InlineKeyboardButton("🗑 Delete thumb", callback_data="us_del")])
+    rows.append([InlineKeyboardButton("❌ Close", callback_data="us_close")])
+    return text, InlineKeyboardMarkup(rows)
+
+
+async def settings_handler(_, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+    _, uid = _who(m)
+    text, kb = _settings_view(await us.get(uid))
+    await reply_message_async(m, text, parse_mode=enums.ParseMode.HTML, reply_markup=kb)
+
+
+async def setthumb_handler(app, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+    _, uid = _who(m)
+    r = m.reply_to_message
+    media = None
+    if r:
+        if r.photo:
+            media = r
+        elif r.document and (r.document.mime_type or "").startswith("image/"):
+            media = r
+    if not media:
+        return await reply_message_async(m, "Reply to a **photo** with `/setthumb`.", parse_mode=enums.ParseMode.MARKDOWN)
+    try:
+        buf = await app.download_media(media, in_memory=True)
+        await us.set_thumb(uid, bytes(buf.getbuffer()))
+    except Exception as e:
+        return await reply_message_async(m, f"❌ Thumbnail failed: {e}", parse_mode=None)
+    await reply_message_async(m, "✅ Thumbnail saved. Applies to your next uploads.", parse_mode=None)
+
+
+async def delthumb_handler(_, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+    _, uid = _who(m)
+    await us.del_thumb(uid)
+    await reply_message_async(m, "🗑 Thumbnail deleted.", parse_mode=None)
+
+
+async def settings_callback_handler(app, cq: CallbackQuery):
+    uid = cq.from_user.id
+    prefs = await us.get(uid)
+    if cq.data == "us_close":
+        try:
+            await cq.message.delete()
+        except Exception:
+            pass
+        return await cq.answer()
+    if cq.data == "us_view":
+        if prefs["thumb"]:
+            await app.send_photo(cq.message.chat.id, prefs["thumb"], caption="🖼 Your thumbnail")
+        return await cq.answer()
+    if cq.data == "us_doc":
+        await us.set_mode(uid, "doc")
+    elif cq.data == "us_vid":
+        await us.set_mode(uid, "video")
+    elif cq.data == "us_del":
+        await us.del_thumb(uid)
+    text, kb = _settings_view(await us.get(uid))
+    try:
+        await cq.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=kb)
+    except Exception:
+        pass
+    await cq.answer("Saved")
+
+
 # ================= REGISTRATION =================
 
 def register_handlers(app, aria2_api, state_vars):
@@ -1333,6 +1440,10 @@ def register_handlers(app, aria2_api, state_vars):
     app.on_message(filters.regex(r"^/cancel(?!all)"))(cancel_handler)
     app.on_callback_query(filters.regex("^status_"))(status_callback_handler)
     app.on_callback_query(filters.regex("^dash_"))(dashboard_callback_handler)
+    app.on_callback_query(filters.regex("^us_"))(settings_callback_handler)
+    app.on_message(filters.command(["settings", "usettings"]))(settings_handler)
+    app.on_message(filters.command("setthumb"))(setthumb_handler)
+    app.on_message(filters.command("delthumb"))(delthumb_handler)
 
     @app.on_message(filters.command(["l", "leech"]))
     async def leech_wrapper(client, message):

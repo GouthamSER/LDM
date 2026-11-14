@@ -1,0 +1,198 @@
+# plugins/usersettings.py
+"""
+Per-user settings: upload type (document / video) + custom thumbnail.
+
+Storage: MongoDB when config.DATABASE_URL is set (motor), otherwise a local
+JSON file. Thumbnails are kept as bytes in Mongo and cached on disk, because
+Telegram needs a real file path for `thumb=`.
+"""
+
+import asyncio
+import io
+import json
+import os
+import shutil
+
+import config
+
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient
+except ImportError:
+    AsyncIOMotorClient = None
+
+THUMB_DIR = os.path.abspath("thumbs")
+JSON_PATH = os.path.abspath("userdata.json")
+VIDEO_EXTS = (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts", ".flv", ".wmv", ".3gp")
+
+_col = None
+_col_failed = False
+_cache = {}          # uid -> {"mode": "doc"|"video", "thumb": path|None}
+_json_lock = asyncio.Lock()
+
+
+def backend():
+    return "MongoDB" if (config.DATABASE_URL and AsyncIOMotorClient and not _col_failed) else "JSON file"
+
+
+def _collection():
+    global _col, _col_failed
+    if _col is not None or _col_failed:
+        return _col
+    if config.DATABASE_URL and AsyncIOMotorClient:
+        try:
+            _col = AsyncIOMotorClient(config.DATABASE_URL, serverSelectionTimeoutMS=8000)[config.DATABASE_NAME]["users"]
+        except Exception as e:
+            print(f"⚠️ MongoDB connect failed, using JSON file: {e}")
+            _col_failed = True
+    return _col
+
+
+def _thumb_path(uid):
+    return os.path.join(THUMB_DIR, f"{uid}.jpg")
+
+
+def is_video(path):
+    return path.lower().endswith(VIDEO_EXTS)
+
+
+# ───────── load / save ─────────
+
+async def _json_read():
+    try:
+        return await asyncio.to_thread(lambda: json.load(open(JSON_PATH)))
+    except Exception:
+        return {}
+
+
+async def _json_write(data):
+    await asyncio.to_thread(lambda: json.dump(data, open(JSON_PATH, "w")))
+
+
+async def get(uid):
+    """-> {"mode": "doc"|"video", "thumb": path|None}"""
+    if uid in _cache:
+        return _cache[uid]
+    mode, thumb = "doc", None
+    col = _collection()
+    try:
+        if col is not None:
+            d = await col.find_one({"_id": uid})
+            if d:
+                mode = d.get("mode", "doc")
+                if d.get("thumb"):
+                    os.makedirs(THUMB_DIR, exist_ok=True)
+                    p = _thumb_path(uid)
+                    await asyncio.to_thread(lambda: open(p, "wb").write(d["thumb"]))
+                    thumb = p
+        else:
+            async with _json_lock:
+                mode = (await _json_read()).get(str(uid), {}).get("mode", "doc")
+            if os.path.exists(_thumb_path(uid)):
+                thumb = _thumb_path(uid)
+    except Exception as e:
+        print(f"⚠️ settings load failed for {uid}: {e}")
+    _cache[uid] = {"mode": mode, "thumb": thumb}
+    return _cache[uid]
+
+
+async def _save(uid, **fields):
+    col = _collection()
+    try:
+        if col is not None:
+            await col.update_one({"_id": uid}, {"$set": fields}, upsert=True)
+        else:
+            async with _json_lock:
+                data = await _json_read()
+                data.setdefault(str(uid), {}).update({k: v for k, v in fields.items() if k != "thumb"})
+                await _json_write(data)
+    except Exception as e:
+        print(f"⚠️ settings save failed for {uid}: {e}")
+
+
+async def set_mode(uid, mode):
+    s = await get(uid)
+    s["mode"] = mode
+    await _save(uid, mode=mode)
+
+
+def _to_thumb_jpeg(raw: bytes) -> bytes:
+    """Telegram thumb rules: JPEG, <=200KB, sides <=320px."""
+    from PIL import Image
+    im = Image.open(io.BytesIO(raw)).convert("RGB")
+    im.thumbnail((320, 320))
+    q = 90
+    while True:
+        out = io.BytesIO()
+        im.save(out, "JPEG", quality=q)
+        if out.tell() <= 200 * 1024 or q <= 30:
+            return out.getvalue()
+        q -= 10
+
+
+async def set_thumb(uid, raw: bytes):
+    jpg = await asyncio.to_thread(_to_thumb_jpeg, raw)
+    os.makedirs(THUMB_DIR, exist_ok=True)
+    p = _thumb_path(uid)
+    await asyncio.to_thread(lambda: open(p, "wb").write(jpg))
+    (await get(uid))["thumb"] = p
+    col = _collection()
+    if col is not None:
+        await _save(uid, thumb=jpg)
+
+
+async def del_thumb(uid):
+    s = await get(uid)
+    s["thumb"] = None
+    try:
+        os.remove(_thumb_path(uid))
+    except OSError:
+        pass
+    col = _collection()
+    if col is not None:
+        try:
+            await col.update_one({"_id": uid}, {"$unset": {"thumb": ""}})
+        except Exception as e:
+            print(f"⚠️ thumb delete failed: {e}")
+
+
+# ───────── ffmpeg helpers ─────────
+
+async def _run(cmd, timeout=40):
+    p = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        out, _ = await asyncio.wait_for(p.communicate(), timeout)
+        return out
+    except Exception:
+        try:
+            p.kill()
+        except Exception:
+            pass
+        return b""
+
+
+async def probe_video(path):
+    """-> (duration_sec, width, height); zeros if ffprobe missing/fails."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return 0, 0, 0
+    out = await _run([ffprobe, "-v", "error", "-select_streams", "v:0",
+                      "-show_entries", "stream=width,height:format=duration", "-of", "json", path])
+    try:
+        d = json.loads(out)
+        st = (d.get("streams") or [{}])[0]
+        return float(d.get("format", {}).get("duration", 0) or 0), int(st.get("width", 0)), int(st.get("height", 0))
+    except Exception:
+        return 0, 0, 0
+
+
+async def make_thumb(path, duration):
+    """Grab a frame at ~10% of the video; returns jpg path or None."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return None
+    out = f"{path}.thumb.jpg"
+    ss = max(1, int(duration * 0.1)) if duration else 1
+    await _run([ffmpeg, "-y", "-loglevel", "error", "-ss", str(ss), "-i", path,
+                "-frames:v", "1", "-vf", "scale=320:-2", "-q:v", "5", out])
+    return out if os.path.exists(out) and os.path.getsize(out) > 0 else None

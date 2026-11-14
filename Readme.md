@@ -50,6 +50,7 @@ Open `requirements.txt`, comment/uncomment the engine you want, redeploy. The bo
 | Auto split | Files over `SPLIT_SIZE` (default 1.95GiB) upload as `.001 .002 …` |
 | Caption template | `LEECH_CAPTION` — `{filename}` `{size}`, HTML allowed |
 | Dump chat | `LEECH_DUMP` — upload to another chat/channel |
+| Upload type + thumbnail | `/settings` (Document / Video), `/setthumb`, `/delthumb`. Saved per user in MongoDB (`DATABASE_URL`) or a local JSON fallback. Video mode sends streamable video with duration/size and an auto thumbnail |
 | Reply-to-link | `/l` `/ql` `/qb` work when replying to a message containing a link |
 | Completion report | Task size, time taken, mode, files uploaded, failures |
 | `/cancelall`, `/ping`, `/help` | owner cancel-all, latency |
@@ -57,7 +58,7 @@ Open `requirements.txt`, comment/uncomment the engine you want, redeploy. The bo
 
 ## 🔧 Extra environment variables
 
-`QBIT_HOST` `QBIT_PORT` (8090) `QBIT_USERNAME` `QBIT_PASSWORD` · `AUTH_USERS` `AUTH_CHATS` · `MAX_UPLOADS` · `SPLIT_SIZE` · `LEECH_CAPTION` · `LEECH_DUMP`
+`QBIT_HOST` `QBIT_PORT` (8090) `QBIT_USERNAME` `QBIT_PASSWORD` · `AUTH_USERS` `AUTH_CHATS` · `MAX_UPLOADS` · `SPLIT_SIZE` · `LEECH_CAPTION` · `LEECH_DUMP` · `DATABASE_URL` `DATABASE_NAME`
 
 ## ⚙️ Prerequisites
 
