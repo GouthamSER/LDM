@@ -228,17 +228,36 @@ async def add(source, tag, save_path=None):
         await asyncio.sleep(2)
         await client.torrents.add(build())
 
-    # Find it: by hash when we could compute one, else by our unique tag.
-    for _ in range(30):
+    # Find it. Try info-hash, then our unique tag, then a scan of every torrent
+    # (v1/v2/hybrid hashes can differ from what we computed). Magnets show up
+    # at once; .torrent / URL adds can take a few seconds.
+    for _ in range(40):
+        t = None
         if want_hash:
             t = await _find(client, want_hash)
-        else:
+        if not t:
             lst = await client.torrents.info(tag=tag)
             t = lst[0] if lst else None
+        if not t and want_hash:
+            for x in await client.torrents.info():
+                if want_hash in (getattr(x, "hash", ""), getattr(x, "infohash_v1", ""),
+                                 getattr(x, "infohash_v2", "")) or x.hash.startswith(want_hash[:40]):
+                    t = x
+                    break
         if t:
             return t.hash
         await asyncio.sleep(1)
-    raise RuntimeError("qBittorrent accepted the torrent but it never showed up")
+
+    # Not found: surface qBittorrent's own reason instead of a vague message.
+    reason = ""
+    try:
+        logs = await client.log.main(normal=False, info=False, warning=True, critical=True)
+        reason = " | ".join(l.message for l in logs[-3:])
+    except Exception:
+        pass
+    raise RuntimeError(
+        "qBittorrent accepted the request but the torrent never appeared"
+        + (f" — qBit log: {reason}" if reason else " (check qbit.log; save path writable? valid magnet/torrent?)"))
 
 
 async def info(h):
