@@ -1,197 +1,147 @@
-# 🚀 Aria2 Leech Telegram Bot
+# 🚀 LDM — Aria2 · qBittorrent · yt-dlp Leech Bot
 
-**A high-performance Telegram bot built with Pyrogram and integrated with Aria2 for fast, direct-link downloading (leeching) and seamless uploading to Telegram chats.**
+Telegram leech bot (wzgram / Pyrogram) that downloads with **Aria2**, **qBittorrent** or **yt-dlp**, then uploads to Telegram. Leechv2-style commands, dashboard, name rules, captions and per-user settings.
 
-[![Repo Owner](https://img.shields.io/badge/Developer-Goutham%20Josh-blue.svg?style=for-the-badge&logo=telegram)](https://t.me/im_goutham_josh)
-[![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](LICENSE)
-
-<br>
-<p align="center">
-  <img src="https://img.shields.io/badge/Fork%20this%20light-weight%20repo%20⭐-Click%20here-blue?style=for-the-badge&logo=github" alt="Fork Repo">
-</p>
-<br>
+[![Developer](https://img.shields.io/badge/Developer-Goutham%20Josh-blue.svg?style=for-the-badge&logo=telegram)](https://t.me/im_goutham_josh)
 
 ## ✨ Features
 
-- **⚡ Fast Downloading**: Utilizes **Aria2** for high-speed, multi-connection downloads
-- **📊 Real-time Progress**: Live updates with speed, ETA, and interactive progress bars (Download → Upload)
-- **📋 Consolidated Status** (`/status`): View all active downloads/uploads in a single refreshable message
-- **🔄 Concurrent Tasks**: Multiple simultaneous downloads/uploads using threading & asyncio
-- **💻 System Stats** (`/stats`): CPU, RAM, Disk usage, and bot activity metrics
-- **❌ Cancellation**: Gracefully cancel active download/upload tasks
-- **🩺 Health Check**: Web endpoint for cloud deployment monitoring
+- **Engines:** Aria2 (direct links, magnets), qBittorrent 5.x (magnets / `.torrent`, all files of multi-file torrents), yt-dlp (YouTube etc., quality picker, playlists, cookies)
+- **Leechv2 dashboard:** `/status` with ⬢⬡ bars, speed, ETA, engine, CPU / RAM / disk footer, refresh and overview buttons
+- **Uploads:** each task sends its files one by one; different tasks upload at the same time and share bandwidth. Auto retry (FloodWait / network), auto split over `SPLIT_SIZE` (`.001 .002 …`)
+- **Per-user settings** (`/settings`): upload as Document or Video, thumbnail, leech dump chat, prefix / suffix / name swap, caption, yt-dlp cookies. Saved in MongoDB, or a local JSON file if no `DATABASE_URL`
+- **Extract:** zip / rar-like / 7z / tar archives with `/unzipleech` (`-e`)
+- **Safety:** owner + authorized users / chats only, disk-space check, cleanup of leftovers, cancel at any stage
+- **Auto "/" command menu** pushed to Telegram on every start
 
-## 🔀 Upload Engine
-
-Two selectable engines, both drop-in `pyrogram` forks — zero code changes to switch:
-
-| Engine | requirements.txt line | Notes |
-|---|---|---|
-| **pyroblack** (default) | `pyroblack` | stable, feature-rich fork |
-| **wzgram[fast]** | `wzgram[fast]` | rust WarpCrypto backend, faster |
-
-Open `requirements.txt`, comment/uncomment the engine you want, redeploy. The bot auto-detects which one is installed and shows it in progress messages — no env var needed (optional `ENGINE_NAME` env var can force a custom label).
-
-## ⌨️ Commands (names match Leechv2) + auto "/" menu
-
-The command list is pushed to Telegram on every start (`SET_COMMANDS=False` to disable).
+## ⌨️ Commands
 
 | Command | What |
 |---|---|
 | `/leech` `/l` · `/unzipleech` `/uzl` | Aria2 direct link (+ extract) |
-| `/qbleech` `/ql` `/qb` · `/qbunzipleech` `/quzl` | qBittorrent magnet / .torrent (+ extract) |
-| `/aria` `/al` | Aria2 magnet / .torrent |
-| `/ytdl` `/y` `/ytdlleech` `/yl` | yt-dlp |
-| `/status` `/s` `/statusall` `/sall` | dashboard |
+| `/qbleech` `/ql` `/qb` · `/qbunzipleech` `/quzl` | qBittorrent magnet / `.torrent` (+ extract) |
+| `/aria` `/al` | Aria2 magnet / `.torrent` |
+| `/ytdl` `/y` · `/ytdlleech` `/yl` | yt-dlp |
+| `/status` `/s` · `/statusall` `/sall` | dashboard |
 | `/cancel_<gid>` `/c_<gid>` · `/cancelall` `/call` | cancel |
-| `/usetting` `/us` `/settings` | upload type, thumbnail, dump, name rules |
+| `/settings` `/usetting` `/us` | user settings panel |
+| `/setthumb` `/delthumb` | thumbnail (reply to a photo) |
+| `/setdump <chat_id\|here>` `/deldump` | leech dump chat |
+| `/setswap` `/setprefix` `/setsuffix` `/setcaption` | filename rules and caption (`clear` removes) |
+| `/setcookies` `/delcookies` | yt-dlp cookies |
 | `/stats` `/st` · `/ping` · `/help` `/h` | info |
-| `/authorize` `/a` · `/unauthorize` `/ua` | owner: allow / remove a replied user, or this chat (saved) |
-| `/log` · `/restart` `/r` `/restartall` | owner: bot log, reboot (with confirm buttons) |
+| `/authorize` `/a` · `/unauthorize` `/ua` | owner: allow / remove a user or chat |
+| `/log` · `/restart` `/r` `/restartall` | owner: log file, reboot |
 
-## ▶️ yt-dlp (`/y`) + 🔤 Name swap (ported from Leechv2)
+Flags: `-e` extract · `-n <name>` rename (single file, keep last) · yt-dlp: `-q 720|best|audio|mp3|<format>` `-np` (no playlist)
 
-- `/y <url>` shows quality buttons (only heights the video really has, MP3 192/320, M4A, best video/audio). Skip them with `-q 720|best|audio|mp3|<yt-dlp format>`. `-np` ignores the playlist part of a URL, `-n <name>` renames (keep `-n` last). Playlists upload every video.
-- **Cookies (like Leechv2):** reply to a Netscape `cookies.txt` with `/setcookies` → saved per user in MongoDB (`/delcookies` removes). Owner: `/setcookies default` sets a bot-wide file (restored from MongoDB on every start, so it survives Koyeb restarts). A user with personal cookies uses them; `/settings` has a toggle "Use default / Use mine" and shows which is active. Cookie files are deleted from the chat after saving. `YTDL_COOKIES` = where the default file lives. Extra options: `YTDL_OPTIONS='{"proxy": "http://..."}'`.
-- **Name swap** `/setswap pattern:replacement|pattern2:replacement2[:count]` — regex on the filename, extension untouched; empty replacement deletes the match. Example: `/setswap \[.*?\]::|www\.\S+::|Hindi:Tamil`.
-- `/setprefix @mychannel\s` and `/setsuffix \s[1080p]` (`\s` = space). Each takes `clear` to remove. Defaults for everyone via `LEECH_PREFIX` / `LEECH_SUFFIX` / `LEECH_NAME_SWAP`. Rules apply to every leech (aria2, qBit, yt-dlp, extracted files); a manual `-n` name on a single file skips them.
-- Dashboard now uses the Leechv2 layout (⬢⬡ bar, Process / Processed / Status / Speed / Time / Engine / In Mode / Out Mode, ☰ overview and ♻️ refresh buttons, CPU / RAM / FREE · IN / OUT · DL / UL / UP footer). The completion report matches too.
+## 🔤 Name rules
 
-## 🧲 qBittorrent engine (new)
+- **Swap:** `/setswap pattern:replacement|pattern2:replacement2[:count]`, regex on the filename, extension untouched, empty replacement deletes. Example: `/setswap \[.*?\]::|www\.\S+::|Hindi:Tamil`
+- **Prefix / suffix:** `/setprefix @channel\s` · `/setsuffix \s[1080p]` (`\s` = space)
+- Defaults for everyone: `LEECH_PREFIX`, `LEECH_SUFFIX`, `LEECH_NAME_SWAP`. Applies to every engine and extracted files; a manual `-n` on a single file skips them.
 
-`/qb <magnet | .torrent URL>` or reply to a `.torrent` file with `/qb`. Uses a local **qBittorrent 5.x** (`qbittorrent-nox`, started by `start.sh`) through its WebUI API (`aioqbt`). Aria2 stays for direct links (`/l`) and `/ql`.
+## 📝 Caption
 
-- Low-RAM libtorrent profile (POSIX disk IO, small caches) — safe on 512MB hosts
-- Multi-file torrents: **every** file is uploaded (old code uploaded only the first)
-- Duplicate / leftover torrent auto-cleanup, dead-magnet timeout (10 min), disk-space check before download
-- Works with `-e` (extract) and `-n <name>` (rename, single-file torrents)
+Default (`LEECH_CAPTION`), per-user override `/setcaption <template>`:
 
-## 🆕 Other additions
-
-| Feature | Notes |
-|---|---|
-| Access control | `OWNER_ID`, `AUTH_USERS`, `AUTH_CHATS` (open only while `OWNER_ID` is the placeholder) |
-| Upload retry | FloodWait + network errors retried (10s / 20s backoff) |
-| Auto split | Files over `SPLIT_SIZE` (default 1.95GiB) upload as `.001 .002 …` |
-| Caption template | `LEECH_CAPTION` — `{filename}` `{size}`, HTML allowed |
-| Dump chat | `LEECH_DUMP` — upload to another chat/channel |
-| Upload type + thumbnail | `/settings` (Document / Video), `/st` (alias), `/setthumb`, `/delthumb`, `/setdump <chat_id|here>`, `/deldump` (per-user leech dump chat). Saved per user in MongoDB (`DATABASE_URL`) or a local JSON fallback. Video mode sends streamable video with duration/size and an auto thumbnail |
-| Reply-to-link | `/l` `/ql` `/qb` work when replying to a message containing a link |
-| Completion report | Task size, time taken, mode, files uploaded, failures |
-| `/cancelall`, `/ping`, `/help` | owner cancel-all, latency |
-| Dashboard | stops refreshing when idle; shows seeders/peers; real engine versions |
-
-## 🔧 Extra environment variables
-
-`QBIT_HOST` `QBIT_PORT` (8090) `QBIT_USERNAME` `QBIT_PASSWORD` · `AUTH_USERS` `AUTH_CHATS` · `MAX_UPLOADS` (2) `MAX_TRANSMISSIONS` (1) · `SPLIT_SIZE` · `LEECH_CAPTION` · `LEECH_DUMP` · `SET_COMMANDS` · `DATABASE_URL` `DATABASE_NAME`
-
-## ⚙️ Prerequisites
-
-- Telegram API credentials (`API_ID` & `API_HASH`)
-- Telegram Bot Token (`BOT_TOKEN`)
-- Running **Aria2 RPC** daemon and **qbittorrent-nox** (both started by `start.sh`)
-- Python 3.10+ environment
-
-## 🛠️ Deployment Options
-
-### 🚀 1. Docker (Recommended - Local & Cloud)
-
-**A. Build the Docker Image**
-git clone https://github.com/GouthamJosh/aria-tg
-cd aria-tg
-docker build -t aria2-leech-bot .
-
-text
-
-**B. Run the Container**
-<br>
-docker run -d<br>
---name aria2-leech<br>
--e API_ID="YOUR_API_ID"<br>
--e API_HASH="YOUR_API_HASH"<br>
--e BOT_TOKEN="YOUR_BOT_TOKEN"<br>
--e OWNER_ID="YOUR_OWNER_ID"<br>
--e ARIA2_HOST="127.0.0.1"<br>
--e ARIA2_PORT="6801"<br>
--e ARIA2_SECRET="gjxdml"<br>
--e PORT="8000"<br>
--p 8000:8000<br><br>
-
-
-### 📱 2. Termux (Android)
-
-**A. Install Dependencies**<br><br>
-pkg update && pkg upgrade<br>
-pkg install -y git python aria2
-<br>
-
-**B. Clone & Setup**<br>
-aria2-leech-bot<br>
-
-**C. Start Aria2 RPC** (in separate Termux session)
-aria2c --enable-rpc --rpc-listen-all --rpc-secret=gjxdml --rpc-port=6801 -D<br><br>
-
-**D. Run Bot**
-bash start.sh<br><br>
-
-
-### ☁️ 3. Cloud Platforms (Heroku/Render/Railway)
-
-1. Fork the repository
-2. Set environment variables in platform dashboard
-3. Deploy with Docker support
-
-## 🔧 Environment Variables
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `API_ID` | Telegram API ID | `12345678` |
-| `API_HASH` | Telegram API Hash | `your_api_hash` |
-| `BOT_TOKEN` | BotFather token | `123456:ABC-DEF...` |
-| `OWNER_ID` | Your Telegram user ID | `123456789` |
-| `ARIA2_HOST` | Aria2 RPC host | `127.0.0.1` |
-| `ARIA2_PORT` | Aria2 RPC port | `6801` |
-| `ARIA2_SECRET` | Aria2 RPC secret | `gjxdml` |
-| `PORT` | Web server port | `8000` |
-
-## 📚 Commands
-
-- `/start` - Bot information
-- `/status` - Active downloads/uploads
-- `/stats` - System statistics
-- `/cancel` - Cancel current task
-
-## 🤝 Credits
-
-**Maintained by [Goutham Josh](https://t.me/im_goutham_josh)**  
-⭐ **Star this repo if it helps you!**
-
-![Star History](https://star-history.com/#GouthamJosh/aria-tg&Date)
-
-
-## Caption & uploads (Leechv2 style)
-- Default caption (env `LEECH_CAPTION`, per-user `/setcaption <template>`, `/setcaption clear`):
-  `{filename} {size} {duration} {quality} {languages} {subtitles} {md5_hash}`. Replace text: `{filename|old:new}`.
-  Lines with video-only placeholders (quality/lang/sub/duration) are dropped for non-video files.
-- Each task uploads its files one by one; different tasks upload at the same time and share bandwidth.
-  `MAX_UPLOADS` (default `0` = no cap) optionally caps simultaneous uploads across all tasks.
-
-
-## Run without Docker
-```bash
-bash setup.sh   # once: apt deps, static qbittorrent-nox, deno, .venv + pip install
-# edit config.py / export env vars, then:
-bash start.sh   # starts aria2 + qBittorrent, then python bot.py
 ```
-`python3 bot.py` alone works only if aria2 (RPC on 6801) and qbittorrent-nox are already running; `start.sh` handles that.
+<b><i>{filename}</i></b>
 
-### Termux
+Size🎲 : <i>{size}</i>
+Quality 💡: <i>{quality}</i>
+Lang 🧩: <i>{languages}</i>
+Sub 📄: <i>{subtitles}</i>
+```
+
+Placeholders: `{filename} {size} {duration} {quality} {languages} {subtitles} {md5_hash}`. Replace text inside a value: `{filename|old:new}`. Lines using video-only values (quality, languages, subtitles, duration) are dropped for non-video files. Quality / language / subtitles come from ffprobe.
+
+## ▶️ yt-dlp and cookies
+
+- `/y <url>` shows quality buttons (heights the video really has, MP3 192/320, M4A, best video / audio). If YouTube says "format is not available" the bot retries with looser formats, other player clients, then without cookies.
+- **Cookies:** reply to a Netscape `cookies.txt` with `/setcookies` (saved per user in MongoDB). Owner: `/setcookies default` for a bot-wide file (restored on every start). `/settings` toggles "default / mine". `YTDL_COOKIES` = default file path. Extra options: `YTDL_OPTIONS='{"proxy": "http://..."}'`
+- YouTube needs a JS runtime: **deno** (installed by the Dockerfile and `setup.sh`; not available on Termux, so use cookies there).
+
+## 🧲 qBittorrent
+
+Local `qbittorrent-nox` started by `start.sh` (WebUI on `127.0.0.1:8090`, localhost auth bypass), controlled through `aioqbt`. Low-RAM libtorrent profile (POSIX disk IO, small caches), duplicate cleanup, dead-magnet timeout (10 min). If `qbittorrent-nox` is missing, only `/qb` is disabled.
+
+## 🛠️ Install & run
+
+Fill the values first: edit `config.py` or set environment variables (table below).
+
+### 🐳 Docker (Koyeb, Render, VPS, local)
+
 ```bash
-pkg install git -y && git clone <your repo> && cd <repo>
+git clone https://github.com/GouthamSER/ldm && cd ldm
+docker build -t ldm-bot .
+docker run -d --name ldm \
+  -e API_ID=123456 -e API_HASH=xxxx -e BOT_TOKEN=123:abc -e OWNER_ID=111111 \
+  -e DATABASE_URL="mongodb+srv://..." \
+  -p 8000:8000 ldm-bot
+```
+
+On Koyeb / Render choose the **Dockerfile** builder and set the same variables in the dashboard. Port `8000` is the health check.
+
+### 🖥️ VPS without Docker (Debian / Ubuntu)
+
+```bash
+bash setup.sh    # once: apt deps, qbittorrent-nox, deno, .venv, pip install
+bash start.sh    # starts aria2 + qBittorrent, then the bot
+```
+
+`python3 bot.py` alone works only if aria2 (RPC `6801`) and qbittorrent-nox are already running.
+
+### 📱 Termux (Android, no root)
+
+```bash
+pkg install git -y && git clone https://github.com/GouthamSER/ldm && cd ldm
 bash termux.sh   # once
 bash start.sh
 ```
-No deno on Termux: YouTube may need cookies (`/setcookies`). If `qbittorrent-nox` is missing, `/qb` is disabled, aria2 still works.
 
-### Buildpack (Heroku / Koyeb buildpack builder)
-Files: `Procfile`, `runtime.txt`, `Aptfile` (aria2, ffmpeg, psmisc; needs the apt buildpack), `bin/post_compile` (downloads static qBittorrent + deno into `./bin`). `start.sh` puts `./bin` and `.apt` on PATH. Set env vars (API_ID, BOT_TOKEN, ...) in the platform dashboard.
+- Run `termux-wake-lock` so Android keeps the bot alive; `tmux` keeps it running after you close the session.
+- No deno: some YouTube links need cookies (`/setcookies`). If `qbittorrent-nox` is not in the repo, `/qb` is disabled and aria2 still works.
+
+### ☁️ Buildpack (Heroku-style)
+
+Files: `Procfile`, `runtime.txt`, `Aptfile` (aria2, ffmpeg, psmisc; needs the apt buildpack), `bin/post_compile` (downloads static qBittorrent and deno into `./bin`). `start.sh` puts `./bin` and `.apt` on `PATH`. If your platform ignores `Aptfile`, use the Docker route instead.
+
+## 🔧 Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_ID` `API_HASH` `BOT_TOKEN` | — | Telegram credentials (required) |
+| `OWNER_ID` | placeholder | Your user ID. Bot is open to everyone while this is the placeholder |
+| `AUTH_USERS` `AUTH_CHATS` | — | Extra allowed user / chat IDs (comma separated) |
+| `ARIA2_HOST` `ARIA2_PORT` `ARIA2_SECRET` | `127.0.0.1` `6801` `gjxdml` | Aria2 RPC (keep port `6801`) |
+| `QBIT_HOST` `QBIT_PORT` `QBIT_USERNAME` `QBIT_PASSWORD` | `127.0.0.1` `8090` | qBittorrent WebUI (empty user = localhost bypass) |
+| `PORT` | `8000` | Health-check web server |
+| `DOWNLOAD_DIR` | `./downloads` | Download folder |
+| `SESSION_NAME` | `ariadwd` | Pyrogram session name |
+| `DATABASE_URL` `DATABASE_NAME` | — `ldmbot` | MongoDB for user settings, cookies, auth list |
+| `MAX_UPLOADS` | `0` | Max files uploading at once across all tasks (`0` = no cap) |
+| `MAX_TRANSMISSIONS` | `1` | Parallel part streams per upload (1 = safest vs FLOOD_WAIT) |
+| `SPLIT_SIZE` | 1.95 GiB | Split bigger files (Premium: 3.9 GiB, `0` = never) |
+| `LEECH_CAPTION` | see above | Default caption template |
+| `LEECH_DUMP` | `0` | Upload into this chat instead of the command chat |
+| `LEECH_PREFIX` `LEECH_SUFFIX` `LEECH_NAME_SWAP` | — | Default name rules |
+| `YTDL_COOKIES` `YTDL_OPTIONS` | `cookies.txt` | yt-dlp default cookies file / extra options (dict literal) |
+| `SET_COMMANDS` | `True` | Push the "/" menu on start |
+| `ENGINE_NAME` | auto | Override the engine label in messages |
+
+## 🩺 Troubleshooting
+
+| Message | Meaning |
+|---|---|
+| `Requested format is not available` | YouTube hides formats. Update yt-dlp, make sure `deno` exists, set fresh cookies |
+| `FLOOD_WAIT … SaveBigFilePart` | Telegram rate limit, retried automatically. Lower `MAX_UPLOADS`, keep `MAX_TRANSMISSIONS=1` |
+| `Upload progress callback error: … cancelled by user` | Normal after `/cancel`, harmless |
+| `Connection closed by the server` | Telegram dropped the socket, the client reconnects |
+| `Client clock is Ns out of step` | Host clock drift, auto-corrected |
+| `Session start attempt N failed` | Telegram unreachable at startup. Check network, one instance only, delete a stale `.session` |
+| qBit "never showed up" | Check `qbit.log`; confirm `qbittorrent-nox` runs on port `8090` |
+
+## 🤝 Credits
+
+Maintained by [Goutham Josh](https://t.me/im_goutham_josh). Dashboard, name rules, caption and command set follow Leechv2. ⭐ Star the repo if it helps.
