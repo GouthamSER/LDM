@@ -93,7 +93,7 @@ def extract_info(url, no_playlist=False, cookiefile=None):
 # ───────────────────────── quality mapping ─────────────────────────
 
 def video_fmt(h):
-    return f"bv*[height<=?{h}][ext=mp4]+ba[ext=m4a]/b[height<=?{h}]/bv*[height<=?{h}]+ba/b[height<=?{h}]"
+    return f"bv*[height<=?{h}][ext=mp4]+ba[ext=m4a]/b[height<=?{h}]/bv*[height<=?{h}]+ba/b[height<=?{h}]/bv*+ba/b"
 
 
 def parse_quality(q):
@@ -165,7 +165,24 @@ def new_pending(uid):
 # ───────────────────────── download ─────────────────────────
 
 def download_blocking(url, outdir, fmt, codec, acq, is_playlist, entry, no_playlist, cookiefile=None):
-    """Runs in a worker thread. Updates `entry` (dashboard dict) from yt-dlp hooks."""
+    """Runs in a worker thread. On "Requested format is not available" retries with looser
+    formats (then without cookies: stale/limited-account cookies can hide formats)."""
+    attempts = [(fmt, cookiefile), ("bv*+ba/b/best", cookiefile)]
+    if cookiefile:
+        attempts.append(("bv*+ba/b/best", None))
+    last = None
+    for f, ck in attempts:
+        try:
+            return _download_once(url, outdir, f, codec, acq, is_playlist, entry, no_playlist, ck)
+        except Exception as e:
+            last = e
+            if "format is not available" not in str(e).lower() or entry.get("cancel"):
+                raise
+            print(f"⚠️ yt-dlp format '{f}' (cookies={bool(ck)}) unavailable, retrying looser")
+    raise last
+
+
+def _download_once(url, outdir, fmt, codec, acq, is_playlist, entry, no_playlist, cookiefile=None):
     state = {"base": 0, "last": 0}
 
     def hook(d):
