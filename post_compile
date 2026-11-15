@@ -1,0 +1,11 @@
+#!/bin/bash
+# Heroku-style buildpack hook (also used by Koyeb buildpack builds): fetch static qBittorrent + deno
+# into ./bin so start.sh finds them. Needs the apt buildpack for Aptfile (aria2, ffmpeg).
+set -e
+BIN="$(pwd)/bin"
+arch="$(uname -m)"
+curl -fsSL -o "$BIN/qbittorrent-nox" "https://github.com/userdocs/qbittorrent-nox-static/releases/latest/download/${arch}-qbittorrent-nox" \
+  && chmod +x "$BIN/qbittorrent-nox" || echo "qbit download failed (optional)"
+case "$arch" in aarch64) da=aarch64 ;; *) da=x86_64 ;; esac
+curl -fsSL -o /tmp/deno.zip "https://github.com/denoland/deno/releases/latest/download/deno-${da}-unknown-linux-gnu.zip" \
+  && unzip -qo /tmp/deno.zip -d "$BIN" && chmod +x "$BIN/deno" || echo "deno download failed (optional)"

@@ -175,3 +175,23 @@ bash start.sh<br><br>
   Lines with video-only placeholders (quality/lang/sub/duration) are dropped for non-video files.
 - Each task uploads its files one by one; different tasks upload at the same time and share bandwidth.
   `MAX_UPLOADS` (default `0` = no cap) optionally caps simultaneous uploads across all tasks.
+
+
+## Run without Docker
+```bash
+bash setup.sh   # once: apt deps, static qbittorrent-nox, deno, .venv + pip install
+# edit config.py / export env vars, then:
+bash start.sh   # starts aria2 + qBittorrent, then python bot.py
+```
+`python3 bot.py` alone works only if aria2 (RPC on 6801) and qbittorrent-nox are already running; `start.sh` handles that.
+
+### Termux
+```bash
+pkg install git -y && git clone <your repo> && cd <repo>
+bash termux.sh   # once
+bash start.sh
+```
+No deno on Termux: YouTube may need cookies (`/setcookies`). If `qbittorrent-nox` is missing, `/qb` is disabled, aria2 still works.
+
+### Buildpack (Heroku / Koyeb buildpack builder)
+Files: `Procfile`, `runtime.txt`, `Aptfile` (aria2, ffmpeg, psmisc; needs the apt buildpack), `bin/post_compile` (downloads static qBittorrent + deno into `./bin`). `start.sh` puts `./bin` and `.apt` on PATH. Set env vars (API_ID, BOT_TOKEN, ...) in the platform dashboard.
