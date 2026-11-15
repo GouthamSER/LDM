@@ -18,6 +18,7 @@ import config
 from plugins import qbit as qb
 from plugins import usersettings as us
 from plugins import ytdl
+from plugins.caption_utils import build_caption, validate_template
 from plugins.filename_utils import format_filename, has_rules, validate_swap
 
 # ================= Global State and Helpers (Placeholders to be set by bot.py) =================
@@ -25,9 +26,18 @@ GLOBAL_STATE = {}
 ARIA2_API = None
 BOT_START = time.time()   # pyrogram Client has no start_time; uptime counts from import
 
-# Cap concurrent Telegram uploads (config.MAX_UPLOADS, default 4) — extra
-# uploads queue instead of blocking, so a slow upload doesn't stall the rest.
-UPLOAD_SEMAPHORE = asyncio.Semaphore(config.MAX_UPLOADS)
+# Uploads work like Leechv2: every task uploads its own files ONE AT A TIME, and all tasks
+# upload at the same time (bandwidth is shared between them). MAX_UPLOADS > 0 optionally caps
+# how many files upload at once across the whole bot (0 = no cap).
+UPLOAD_SEMAPHORE = asyncio.Semaphore(config.MAX_UPLOADS) if config.MAX_UPLOADS > 0 else None
+
+
+class _NoSlot:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
 
 # --- Helper Functions ---
 
@@ -338,14 +348,6 @@ def _enough_disk(need):
         return True
 
 
-def make_caption(name, size):
-    tpl = (config.LEECH_CAPTION or "<b>{filename}</b>").replace("\\n", "\n")
-    try:
-        return tpl.format(filename=_html.escape(name), size=format_size(size))
-    except Exception:
-        return f"<b>{_html.escape(name)}</b>"
-
-
 def split_file(path, part_size, chunk=8 * 1024 * 1024):
     """Byte-split `path` into path.001, path.002 ... Returns the part paths."""
     size = os.path.getsize(path)
@@ -405,7 +407,7 @@ async def _send_with_retry(app, chat_id, path, gid, offset, total, caption, kind
 
 async def upload_file(app, target_chat, file_path, name, file_size, gid):
     """Upload one file (auto-split above SPLIT_SIZE). Returns (ok, error_text)."""
-    async with UPLOAD_SEMAPHORE:
+    async with (UPLOAD_SEMAPHORE or _NoSlot()):
         entry = GLOBAL_STATE["ACTIVE"].get(gid)
         parts = [file_path]
         ok, err = False, ""
@@ -413,6 +415,12 @@ async def upload_file(app, target_chat, file_path, name, file_size, gid):
         try:
             if entry is None or entry.get("cancel"):
                 raise Exception(CANCEL_MSG)
+            entry["queued"] = False                 # this file is the active one now
+            entry["start_time"] = time.time()
+            prefs = await us.get(entry.get("user_id", 0))
+            tpl = prefs.get("caption") or config.LEECH_CAPTION
+            media = None
+            _, media = await build_caption(tpl, file_path, name, file_size)   # primes ffprobe once
 
             limit = config.SPLIT_SIZE
             if limit and file_size > limit:
@@ -423,7 +431,6 @@ async def upload_file(app, target_chat, file_path, name, file_size, gid):
 
             total = sum(os.path.getsize(p) for p in parts)
             offset = 0
-            prefs = await us.get(entry.get("user_id", 0))
             for part in parts:
                 psize = os.path.getsize(part)
                 pname = name if len(parts) == 1 else os.path.basename(part)
@@ -436,8 +443,9 @@ async def upload_file(app, target_chat, file_path, name, file_size, gid):
                     kind = "video"
                     extra = {"duration": int(dur), "width": w, "height": h, "supports_streaming": True}
                 try:
+                    cap, media = await build_caption(tpl, file_path, pname, psize, media)
                     await _send_with_retry(app, target_chat, part, gid, offset, total,
-                                           make_caption(pname, psize), kind, thumb, extra)
+                                           cap, kind, thumb, extra)
                 finally:
                     if auto_thumb:
                         await asyncio.to_thread(_rm_path, auto_thumb)
@@ -482,13 +490,13 @@ async def help_handler(_, m):
         "┠ `/status` `/s` — live dashboard\n"
         "┠ `/cancel_<gid>` `/c_<gid>` — cancel a task  •  `/cancelall` `/call` — cancel everything (owner)\n"
         "┠ `/usetting` `/us` `/settings` — upload type, thumbnail, dump, name rules\n"
-        "┠ `/setthumb` `/delthumb` `/setdump` `/deldump` `/setswap` `/setprefix` `/setsuffix`\n"
+        "┠ `/setthumb` `/delthumb` `/setdump` `/deldump` `/setswap` `/setprefix` `/setsuffix` `/setcaption`\n"
         "┠ `/setcookies` (reply to cookies.txt) `/delcookies` — yt-dlp login cookies (owner: `default`)\n"
         "┠ `/stats` `/st` — system stats  •  `/ping`\n"
         "┠ `/authorize` `/a` `/unauthorize` `/ua` — allow / remove a user or chat (owner)\n"
         "┠ `/log` — bot log (owner)  •  `/restart` `/r` — reboot (owner)\n"
         "┖ Reply to a message that contains a link with any leech command.\n\n"
-        f"**⚡ Uploads:** up to {config.MAX_UPLOADS} in parallel, auto-retry, files over the Telegram limit are split into `.001 .002 …`\n"
+        "**⚡ Uploads:** each task sends its files one by one, tasks upload in parallel & share speed, auto-retry, files over the Telegram limit are split into `.001 .002 …`\n"
         "**📦 Extract:** `.zip` `.7z` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tar.xz` (no `.rar`)"
     )
     await reply_message_async(m, help_message, parse_mode=PARSE_MODE)
@@ -1025,6 +1033,7 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
         sub = f"{gid}_u{idx}"
         GLOBAL_STATE["ACTIVE"][sub] = {
             "cancel": False, "file_path": p, "name": name, "kind": "⬆️ UL",
+            "queued": idx > 1, "file_no": idx, "file_count": len(jobs),
             "progress": {"done": 0, "total": size, "speed": 0},
             "base_gid": gid, "cleanup": cleanup,
             "chat_id": m.chat.id, "start_time": time.time(),
@@ -1033,9 +1042,10 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
         }
         upload_jobs.append((p, name, size, sub))
 
-    results = await asyncio.gather(*[
-        upload_file(app, target_chat, p, name, size, sub) for p, name, size, sub in upload_jobs
-    ])
+    # one file at a time per task (like Leechv2); other tasks upload in parallel with this one
+    results = []
+    for p, name, size, sub in upload_jobs:
+        results.append(await upload_file(app, target_chat, p, name, size, sub))
 
     # ── 5. cleanup + completion report ─────────────────────────────────────
     await _rm_paths(cleanup)
@@ -1161,14 +1171,15 @@ def _dashboard_tasks(chat_id):
     """Snapshot of all active DL / EX / UL tasks for this chat (insertion order)."""
     tasks = []
     for gid, info in list(GLOBAL_STATE["ACTIVE"].items()):
-        if info.get("chat_id") != chat_id or "kind" not in info:
+        if info.get("chat_id") != chat_id or "kind" not in info or info.get("queued"):
             continue
         prog = info.get("progress") or {}
         kind = info["kind"]
         default_status = {"⬇️ DL": "Download", "⬆️ UL": "Upload"}.get(kind, "Extract")
         out_mode, in_mode = _split_mode(info.get("mode_tag", ""))
         tasks.append({
-            "gid": gid, "kind": kind, "name": info.get("name", "?"),
+            "gid": gid, "kind": kind,
+            "name": info.get("name", "?") + (f"  [{info['file_no']}/{info['file_count']}]" if info.get("file_count", 1) > 1 else ""),
             "done": prog.get("done", 0), "total": prog.get("total", 0), "speed": prog.get("speed", 0),
             "status": info.get("status", default_status),
             "engine": info.get("engine", "?"),
@@ -1566,6 +1577,13 @@ _RULE_HELP = {
         "(removes [brackets] and www urls, swaps Hindi → Tamil)",
     ),
     "prefix": ("Prefix", "Text put in front of the filename. <code>\\s</code> = space. Example: <code>@mychannel\\s-\\s</code>"),
+    "caption": (
+        "Caption",
+        "Leech caption template (HTML ok, multi-line ok).\n"
+        "Placeholders: <code>{filename} {size} {duration} {quality} {languages} {subtitles} {md5_hash}</code>\n"
+        "Lines with video-only placeholders are dropped for non-video files.\n"
+        "Replace text: <code>{filename|old:new}</code>",
+    ),
     "suffix": ("Suffix", "Text put after the filename (before the extension). <code>\\s</code> = space. Example: <code>\\s[1080p]</code>"),
 }
 
@@ -1577,7 +1595,7 @@ async def _rule_cmd(m, key):
     label, help_text = _RULE_HELP[key]
     parts = (m.text or "").split(None, 1)
     value = parts[1].strip() if len(parts) > 1 else ""
-    cmd = {"name_swap": "setswap", "prefix": "setprefix", "suffix": "setsuffix"}[key]
+    cmd = {"name_swap": "setswap", "prefix": "setprefix", "suffix": "setsuffix", "caption": "setcaption"}[key]
     cur = (await us.get(uid)).get(key, "")
     if not value:
         return await reply_message_async(
@@ -1587,6 +1605,10 @@ async def _rule_cmd(m, key):
     if value.lower() in ("clear", "none", "off", "del"):
         await us.set_rule(uid, key, "")
         return await reply_message_async(m, f"🗑 {label} cleared.", parse_mode=None)
+    if key == "caption":
+        err = validate_template(value)
+        if err:
+            return await reply_message_async(m, f"❌ {err}", parse_mode=None)
     if key == "name_swap":
         err = validate_swap(value)
         if err:
@@ -1605,6 +1627,10 @@ async def setprefix_handler(_, m: Message):
 
 async def setsuffix_handler(_, m: Message):
     await _rule_cmd(m, "suffix")
+
+
+async def setcaption_handler(_, m: Message):
+    await _rule_cmd(m, "caption")
 
 
 
@@ -1690,11 +1716,12 @@ def _settings_view(prefs):
         f"┠ Prefix: <code>{_html.escape(prefs.get('prefix') or config.LEECH_PREFIX or 'none')}</code>\n"
         f"┠ Suffix: <code>{_html.escape(prefs.get('suffix') or config.LEECH_SUFFIX or 'none')}</code>\n"
         f"┠ Name Swap: <code>{_html.escape(prefs.get('name_swap') or config.LEECH_NAME_SWAP or 'none')}</code>\n"
+        f"┠ Caption: <b>{'✅ custom' if prefs.get('caption') else 'default'}</b>\n"
         f"┠ yt-dlp cookies: <b>{_cookie_status(prefs)}</b>\n"
         f"┖ Saved in: <b>{us.backend()}</b>\n\n"
         "Thumb: reply to a photo with /setthumb\n"
         "Dump: /setdump &lt;chat_id&gt; (or /setdump here inside the group/channel)\n"
-        "Names: /setswap  /setprefix  /setsuffix\n"
+        "Names: /setswap  /setprefix  /setsuffix  /setcaption\n"
         "Cookies: reply to a cookies.txt with /setcookies"
     )
     rows = [[
@@ -1940,6 +1967,7 @@ BOT_COMMANDS = [
     ("setswap", "[pattern:replacement|...] Filename Name Swap (regex)"),
     ("setprefix", "[text] Filename prefix"),
     ("setsuffix", "[text] Filename suffix"),
+    ("setcaption", "[template] Leech caption"),
     ("setcookies", "[reply to cookies.txt] Set yt-dlp cookies"),
     ("delcookies", "Remove your yt-dlp cookies"),
     ("ping", "Ping Bot to test Response Speed"),
@@ -2022,6 +2050,7 @@ def register_handlers(app, aria2_api, state_vars):
     app.on_message(cmd("setswap"))(setswap_handler)
     app.on_message(cmd("setprefix"))(setprefix_handler)
     app.on_message(cmd("setsuffix"))(setsuffix_handler)
+    app.on_message(cmd("setcaption"))(setcaption_handler)
     app.on_message(cmd("setcookies"))(setcookies_handler)
     app.on_message(cmd("delcookies"))(delcookies_handler)
 

@@ -78,7 +78,7 @@ async def get(uid):
     if uid in _cache:
         return _cache[uid]
     mode, thumb, dump = "doc", None, 0
-    rules = {"prefix": "", "suffix": "", "name_swap": ""}
+    rules = {"prefix": "", "suffix": "", "name_swap": "", "caption": ""}
     cookie, use_def = None, False
     col = _collection()
     try:
@@ -137,8 +137,8 @@ async def set_dump(uid, chat_id):
 
 
 async def set_rule(uid, key, value):
-    """key in prefix | suffix | name_swap. Empty value clears it."""
-    assert key in ("prefix", "suffix", "name_swap")
+    """key in prefix | suffix | name_swap | caption. Empty value clears it."""
+    assert key in ("prefix", "suffix", "name_swap", "caption")
     (await get(uid))[key] = value
     await _save(uid, **{key: value})
 
