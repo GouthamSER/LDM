@@ -30,13 +30,6 @@ def format_filename(file_name, prefs):
     prefix, suffix, name_swap = effective_rules(prefs)
     original_file = file_name
 
-    file_name = re_sub(
-        r"www\.[a-zA-Z0-9-]+\.[a-zA-Z]{2,12}(?:\.[a-zA-Z]{2,3})?",
-        "",
-        file_name,
-    )
-    file_name = re_sub(r"^\s*[-_~]+\s*", "", file_name).strip()
-
     # name_swap: regex |pattern:replacement[:count]
     if name_swap:
         try:
@@ -68,6 +61,15 @@ def format_filename(file_name, prefs):
         except Exception as e:
             LOGGER.error(f"Name Swap processing error: {e}")
             file_name = original_file
+
+    # built-in cleanup runs AFTER the user's swap, so a rule like [www.site.xyz] can still
+    # match its brackets before the bare domain is stripped
+    file_name = re_sub(
+        r"www\.[a-zA-Z0-9-]+\.[a-zA-Z]{2,12}(?:\.[a-zA-Z]{2,3})?",
+        "",
+        file_name,
+    )
+    file_name = re_sub(r"^\s*[-_~]+\s*", "", file_name).strip()
 
     if prefix:
         prefix_clean = prefix.replace("\\s", " ")
