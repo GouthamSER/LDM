@@ -12,3 +12,5 @@ motor
 Pillow
 yt-dlp[default]
 psutil
+langcodes
+language_data

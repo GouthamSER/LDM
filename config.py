@@ -94,16 +94,21 @@ AUTH_CHATS = _id_list("AUTH_CHATS")
 # Upload behaviour
 # =================
 # Parallel Telegram uploads
-# Default 2: more parallel uploads trips Telegram's FLOOD_WAIT on upload.SaveBigFilePart
-# (the lib auto-retries, but speed drops). Raise only on a strong connection.
-MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 2))
+# Max files uploading at once across ALL tasks. 0 = no cap (Leechv2 style: each task uploads its
+# files one by one, tasks run in parallel and share the bandwidth).
+MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 0))
 # Parallel file-part streams per upload inside the Telegram client (1 = safest vs FLOOD_WAIT)
 MAX_TRANSMISSIONS = int(get_env_variable("MAX_TRANSMISSIONS", 1))
 # Files bigger than this are split into .001 .002 ... parts (bytes).
 # Default 1.95GiB (safe for the 2GB bot limit). Premium uploader: 3.9GiB. 0 = never split.
 SPLIT_SIZE = int(get_env_variable("SPLIT_SIZE", int(1.95 * 1024**3)))
-# Caption template. Placeholders: {filename} {size} {mode}. HTML allowed.
-LEECH_CAPTION = get_env_variable("LEECH_CAPTION", "<b>{filename}</b>\n<code>{size}</code>")
+# Default caption (per-user override: /setcaption). Placeholders: {filename} {size} {duration}
+# {quality} {languages} {subtitles} {md5_hash}. HTML allowed. Lines using video-only
+# placeholders are dropped for non-video files.
+LEECH_CAPTION = get_env_variable(
+    "LEECH_CAPTION",
+    "<b><i>{filename}</i></b>\n\nSize🎲 : <i>{size}</i>\nQuality 💡: <i>{quality}</i>\n"
+    "Lang 🧩: <i>{languages}</i>\nSub 📄: <i>{subtitles}</i>")
 # Leech into this chat instead of the command chat (0 = same chat). Optional dump channel.
 LEECH_DUMP = int(get_env_variable("LEECH_DUMP", 0))
 

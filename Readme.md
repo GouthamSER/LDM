@@ -83,7 +83,7 @@ The command list is pushed to Telegram on every start (`SET_COMMANDS=False` to d
 
 ## 🔧 Extra environment variables
 
-`QBIT_HOST` `QBIT_PORT` (8090) `QBIT_USERNAME` `QBIT_PASSWORD` · `AUTH_USERS` `AUTH_CHATS` · `MAX_UPLOADS` · `SPLIT_SIZE` · `LEECH_CAPTION` · `LEECH_DUMP` · `SET_COMMANDS` · `DATABASE_URL` `DATABASE_NAME`
+`QBIT_HOST` `QBIT_PORT` (8090) `QBIT_USERNAME` `QBIT_PASSWORD` · `AUTH_USERS` `AUTH_CHATS` · `MAX_UPLOADS` (2) `MAX_TRANSMISSIONS` (1) · `SPLIT_SIZE` · `LEECH_CAPTION` · `LEECH_DUMP` · `SET_COMMANDS` · `DATABASE_URL` `DATABASE_NAME`
 
 ## ⚙️ Prerequisites
 
@@ -167,3 +167,11 @@ bash start.sh<br><br>
 ⭐ **Star this repo if it helps you!**
 
 ![Star History](https://star-history.com/#GouthamJosh/aria-tg&Date)
+
+
+## Caption & uploads (Leechv2 style)
+- Default caption (env `LEECH_CAPTION`, per-user `/setcaption <template>`, `/setcaption clear`):
+  `{filename} {size} {duration} {quality} {languages} {subtitles} {md5_hash}`. Replace text: `{filename|old:new}`.
+  Lines with video-only placeholders (quality/lang/sub/duration) are dropped for non-video files.
+- Each task uploads its files one by one; different tasks upload at the same time and share bandwidth.
+  `MAX_UPLOADS` (default `0` = no cap) optionally caps simultaneous uploads across all tasks.
