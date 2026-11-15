@@ -127,7 +127,7 @@ DATABASE_NAME = get_env_variable("DATABASE_NAME", "ldmbot")
 # =================
 LEECH_PREFIX    = get_env_variable("LEECH_PREFIX", "")
 LEECH_SUFFIX    = get_env_variable("LEECH_SUFFIX", "")
-LEECH_NAME_SWAP = get_env_variable("LEECH_NAME_SWAP", "[\[\(\{] *www\.[^\]\)\}]+[\]\)\}]:|www\.[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,10}:|^[ \-_~]+:")
+LEECH_NAME_SWAP = get_env_variable("LEECH_NAME_SWAP", r"[\[\(\{] *www\.[^\]\)\}]+[\]\)\}]:|www\.[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,10}:|^[ \-_~]+:")
 #leech name swap this removes domain name eg: www.domain.ext movie.mkv -> movie.mkv
 
 # =================
