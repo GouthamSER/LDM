@@ -103,13 +103,11 @@ def time_tracker():
 threading.Thread(target=time_tracker, daemon=True).start()
 
 # ================= BOT CLIENT =================
-app = Client(
-    "aria2-leech-bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workers=16
-)
+_client_kwargs = dict(api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
+try:
+    app = Client("aria2-leech-bot", max_concurrent_transmissions=config.MAX_TRANSMISSIONS, **_client_kwargs)
+except TypeError:   # fork without that parameter
+    app = Client("aria2-leech-bot", **_client_kwargs)
 
 # Register handlers from the external module
 register_handlers(app, aria2, GLOBAL_STATE)
