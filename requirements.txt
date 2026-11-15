@@ -10,3 +10,5 @@ starlette
 py7zr
 motor
 Pillow
+yt-dlp[default]
+psutil

@@ -109,3 +109,26 @@ LEECH_DUMP = int(get_env_variable("LEECH_DUMP", 0))
 # =================
 DATABASE_URL  = get_env_variable("DATABASE_URL", "")
 DATABASE_NAME = get_env_variable("DATABASE_NAME", "ldmbot")
+
+# =================
+# Filename rules (ported from Leechv2). Per-user values (/setswap /setprefix /setsuffix) win over these.
+# NAME_SWAP format:  pattern:replacement|pattern2:replacement2[:count]
+#   e.g.  \[.*?\]::|www\.\S+::     (remove [brackets] and www urls)
+# ("\s" in a pattern/prefix/suffix is turned into a space)
+# =================
+LEECH_PREFIX    = get_env_variable("LEECH_PREFIX", "")
+LEECH_SUFFIX    = get_env_variable("LEECH_SUFFIX", "")
+LEECH_NAME_SWAP = get_env_variable("LEECH_NAME_SWAP", "")
+
+# =================
+# yt-dlp
+# =================
+# Netscape cookies file (YouTube sign-in / age gate etc). Used when the file exists.
+YTDL_COOKIES = get_env_variable("YTDL_COOKIES", "cookies.txt")
+# Extra yt-dlp options as a python-dict literal, e.g. {"proxy": "http://..."}
+YTDL_OPTIONS = get_env_variable("YTDL_OPTIONS", "")
+
+# =================
+# Telegram command menu (the "/" list) — set automatically on every start
+# =================
+SET_COMMANDS = str(get_env_variable("SET_COMMANDS", "True")).lower() in ("1", "true", "yes")

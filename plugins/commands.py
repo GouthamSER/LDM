@@ -1,14 +1,15 @@
 # plugins/commands.py
 
 import os
+import sys
+import json
 import time
 import asyncio
-import subprocess
 import html as _html
 
 # NOTE: We need InlineKeyboardMarkup and InlineKeyboardButton for /status
 from pyrogram import filters, enums
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from pyrogram.errors import FloodWait
 
 import shutil
@@ -16,10 +17,13 @@ from pathlib import Path
 import config
 from plugins import qbit as qb
 from plugins import usersettings as us
+from plugins import ytdl
+from plugins.filename_utils import format_filename, has_rules, validate_swap
 
 # ================= Global State and Helpers (Placeholders to be set by bot.py) =================
 GLOBAL_STATE = {}
 ARIA2_API = None
+BOT_START = time.time()   # pyrogram Client has no start_time; uptime counts from import
 
 # Cap concurrent Telegram uploads (config.MAX_UPLOADS, default 4) — extra
 # uploads queue instead of blocking, so a slow upload doesn't stall the rest.
@@ -258,6 +262,16 @@ async def extract_file(
 _OWNER_PLACEHOLDER = 123456789
 
 
+def _split_mode(mode_tag):
+    """'#Leech | #Aria2' -> (out_mode, in_mode)  (Leechv2 shows them as two lines)."""
+    parts = [x.strip() for x in (mode_tag or "").split("|")]
+    return (parts[0] if parts and parts[0] else "#Leech"), (parts[1] if len(parts) > 1 else "")
+
+
+def _mention(name, uid):
+    return f'<a href="tg://user?id={uid}">{_html.escape(str(name))}</a>' if uid else _html.escape(str(name))
+
+
 def _who(m):
     """(first_name, id) — survives anonymous-admin / channel posts where from_user is None."""
     if m.from_user:
@@ -446,29 +460,38 @@ async def upload_file(app, target_chat, file_path, name, file_size, gid):
 # ================= COMMAND HANDLERS =================
 
 async def start_handler(_, m):
-    PARSE_MODE = enums.ParseMode.MARKDOWN
     user_name = m.from_user.first_name if m.from_user else "there"
-    start_message = (
+    await reply_message_async(
+        m,
         f"👋 Hello, **{user_name}**!\n"
-        "I am a fast leech bot — **Aria2** + **qBittorrent** download, **Telegram** upload.\n\n"
-        "**📚 How to Use Me:**\n"
-        "┠ Direct link: `/l <URL>`\n"
-        "┠ Leech & extract: `/l <URL> -e`\n"
-        "┠ Rename: `/l <URL> -n <new name>`\n"
-        "┠ Magnet / .torrent via **qBittorrent**: `/qb <magnet|.torrent URL>` or reply to a `.torrent` with `/qb`\n"
-        "┠ Magnet / .torrent via **Aria2**: `/ql <magnet>` or reply to a `.torrent` with `/ql`\n"
-        "┠ Reply to a message containing a link with `/l` or `/qb`\n"
-        "┠ Active transfers: `/status`\n"
-        "┠ Upload type (Document / Video) + thumbnail: `/settings` (`/st`), `/setthumb`, `/delthumb`\n┠ Leech dump chat: `/setdump <chat_id|here>`, `/deldump`\n"
-        "┠ System stats: `/stats`  •  Latency: `/ping`\n"
-        "┠ Cancel one task: `/cancel_<gid>`\n"
-        "┖ Cancel everything (owner): `/cancelall`\n\n"
-        f"**⚡ Uploads:** up to {config.MAX_UPLOADS} in parallel, auto-retry on network errors, "
-        "files over the Telegram limit are split into `.001 .002 …` parts.\n\n"
-        "**📦 Extract (`-e`):** `.zip` `.7z` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tar.xz` (no `.rar`)\n\n"
-        "🚀 Happy Leeching!"
+        "I leech links, torrents and videos to Telegram — **Aria2**, **qBittorrent** and **yt-dlp**.\n\n"
+        "Type /help to see every command.",
+        parse_mode=enums.ParseMode.MARKDOWN)
+
+
+async def help_handler(_, m):
+    PARSE_MODE = enums.ParseMode.MARKDOWN
+    help_message = (
+        "**📚 Commands**\n"
+        "┠ `/leech` `/l` `<url>` — direct link via Aria2 (`-e` extract, `-n <name>` rename)\n"
+        "┠ `/unzipleech` `/uzl` `<url>` — leech + extract archive\n"
+        "┠ `/qbleech` `/ql` `/qb` `<magnet|.torrent>` — torrent via **qBittorrent** (or reply to a `.torrent`)\n"
+        "┠ `/qbunzipleech` `/quzl` — qBit leech + extract\n"
+        "┠ `/aria` `/al` `<magnet>` — torrent via **Aria2**\n"
+        "┠ `/ytdl` `/y` `/ytdlleech` `/yl` `<url>` — **yt-dlp** (quality buttons, `-q 720`, `-np`, `-n name`)\n"
+        "┠ `/status` `/s` — live dashboard\n"
+        "┠ `/cancel_<gid>` `/c_<gid>` — cancel a task  •  `/cancelall` `/call` — cancel everything (owner)\n"
+        "┠ `/usetting` `/us` `/settings` — upload type, thumbnail, dump, name rules\n"
+        "┠ `/setthumb` `/delthumb` `/setdump` `/deldump` `/setswap` `/setprefix` `/setsuffix`\n"
+        "┠ `/setcookies` (reply to cookies.txt) `/delcookies` — yt-dlp login cookies (owner: `default`)\n"
+        "┠ `/stats` `/st` — system stats  •  `/ping`\n"
+        "┠ `/authorize` `/a` `/unauthorize` `/ua` — allow / remove a user or chat (owner)\n"
+        "┠ `/log` — bot log (owner)  •  `/restart` `/r` — reboot (owner)\n"
+        "┖ Reply to a message that contains a link with any leech command.\n\n"
+        f"**⚡ Uploads:** up to {config.MAX_UPLOADS} in parallel, auto-retry, files over the Telegram limit are split into `.001 .002 …`\n"
+        "**📦 Extract:** `.zip` `.7z` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tar.xz` (no `.rar`)"
     )
-    await reply_message_async(m, start_message, parse_mode=PARSE_MODE)
+    await reply_message_async(m, help_message, parse_mode=PARSE_MODE)
 
 
 async def ping_handler(_, m):
@@ -486,7 +509,7 @@ async def leech_handler(app, m: Message):
         return await _deny(m)
 
     args = list(m.command[1:])
-    extract_mode = "-e" in args
+    extract_mode = "-e" in args or m.command[0].lower() in ("unzipleech", "uzl")
     args = [a for a in args if a != "-e"]
     args, rename_to = _extract_rename_flag(args)
     url = args[0] if args else _link_from_reply(m)
@@ -574,11 +597,11 @@ async def ql_handler(app, m: Message):
         return await reply_message_async(
             m,
             "Usage:\n"
-            "`/ql <magnet_link>`            — Leech a magnet link\n"
-            "`/ql <magnet_link> -e`         — Leech magnet, extract, then upload\n"
-            "`/ql <magnet_link> -n <name>`  — Leech magnet and rename before upload\n"
-            "Reply to a `.torrent` file with `/ql` to leech it\n"
-            "Want qBittorrent instead? Use `/qb`.",
+            "`/aria <magnet_link>`          — Leech a magnet link (Aria2)\n"
+            "`/aria <magnet_link> -e`       — Leech magnet, extract, then upload\n"
+            "`/aria <magnet_link> -n <name>` — Leech magnet and rename before upload\n"
+            "Reply to a `.torrent` file with `/aria` to leech it\n"
+            "Want qBittorrent instead? Use `/ql`.",
             parse_mode=enums.ParseMode.MARKDOWN
         )
 
@@ -627,7 +650,7 @@ async def qb_handler(app, m: Message):
                                          parse_mode=enums.ParseMode.MARKDOWN)
 
     args = list(m.command[1:])
-    extract_mode = "-e" in args
+    extract_mode = "-e" in args or m.command[0].lower() in ("qbunzipleech", "quzl")
     args = [a for a in args if a != "-e"]
     args, rename_to = _extract_rename_flag(args)
     source = args[0] if args else _link_from_reply(m)
@@ -741,7 +764,7 @@ def _aria_tracker(dl, extra_cleanup=()):
             entry["name"] = dl.name
             entry["progress"] = {"done": dl.completed_length, "total": dl.total_length, "speed": dl.download_speed}
             if dl.bittorrent and dl.connections is not None:
-                entry["extra"] = f"Seeders: {dl.num_seeders} | Conn: {dl.connections}"
+                entry["extra"] = f"<b>Seeders :</b> {dl.num_seeders} | <b>Conn :</b> {dl.connections}"
             if not disk_checked and dl.total_length > 0:
                 disk_checked = True
                 if not _enough_disk(dl.total_length - dl.completed_length):
@@ -791,7 +814,7 @@ def _qbit_tracker(h):
             entry["name"] = t.name
             entry["status"] = qb.state_text(t.state)
             entry["progress"] = {"done": int(t.size * t.progress), "total": t.size, "speed": t.dlspeed}
-            entry["extra"] = f"Seeders: {t.num_seeds} | Peers: {t.num_leechs}"
+            entry["extra"] = f"<b>Seeders :</b> {t.num_seeds} | <b>Leechers :</b> {t.num_leechs}"
 
             if qb.is_error(t):
                 try:
@@ -908,7 +931,9 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
         return await reply_message_async(m, "❌ Download complete but no usable files (missing or empty).",
                                          parse_mode=None)
 
-    # ── 2. rename: -n wins for a single file, else strip site-tag junk ──────
+    # ── 2. rename: -n wins for a single file (no rules, like Leechv2); else site-tag
+    #       cleanup + Leechv2 name-swap / prefix / suffix rules ──────────────────
+    prefs = await us.get(uid)
     renamed = []
     for p in files:
         original = os.path.basename(p)
@@ -918,6 +943,8 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
             new_name = rename_to if new_ext else f"{rename_to}{orig_ext}"
         else:
             new_name = clean_filename(original)
+            if has_rules(prefs):
+                new_name = format_filename(new_name, prefs)
         new_name = new_name.replace("/", "_")
         if new_name != original:
             dest = os.path.join(os.path.dirname(p), new_name)
@@ -931,7 +958,8 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
     files = renamed
 
     # ── 3. extract (-e): archives are unpacked, other files pass through ────
-    jobs = []   # (path, name)
+    jobs = []
+    fresh = set()   # files that came out of an archive -> still need the name rules
     if extract_mode:
         for i, p in enumerate(files, 1):
             if not p.lower().endswith(ARCHIVE_EXTS):
@@ -965,6 +993,7 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
             for root, _, fnames in os.walk(extract_dir):
                 for fname in sorted(fnames):
                     jobs.append(os.path.join(root, fname))
+                    fresh.add(jobs[-1])
     else:
         jobs = files
 
@@ -977,7 +1006,11 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
     upload_jobs = []
     for idx, p in enumerate(jobs, 1):
         original = os.path.basename(p)
-        name = clean_filename(original) if extract_mode else original
+        name = original
+        if p in fresh:
+            name = clean_filename(original)
+            if has_rules(prefs):
+                name = format_filename(name, prefs)
         if name != original:
             dest = os.path.join(os.path.dirname(p), name)
             if not os.path.exists(dest):
@@ -1014,15 +1047,19 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
 
     total_size = sum(j[2] for j in upload_jobs)
     elapsed = time_fmt(time.time() - start_time)
+    out_mode, in_mode = _split_mode(mode_tag)
     lines = [
-        "✅ <b>Leech Completed</b>" if ok_count == len(results) else "⚠️ <b>Leech Finished With Errors</b>",
-        f"<b>{_html.escape(dl_name)}</b>",
+        f"<blockquote><b><i>{_html.escape(dl_name)}</i></b></blockquote>",
+        "",
         f"┌ <b>Task Size:</b> {format_size(total_size)}",
         f"├ <b>Time Taken:</b> {elapsed}",
-        f"├ <b>Mode:</b> {mode_tag}",
-        f"├ <b>Total Files:</b> {ok_count}/{len(results)} uploaded",
-        f"└ <b>Task By:</b> {_html.escape(first)}",
+        f"├ <b>In Mode:</b> {_html.escape(in_mode)}",
+        f"├ <b>Out Mode:</b> {_html.escape(out_mode)}",
+        f"├ <b>Total Files:</b> {ok_count}" + ("" if ok_count == len(results) else f"/{len(results)}"),
+        f"└ <b>Task By:</b> {_mention(first, uid)}",
     ]
+    if ok_count != len(results):
+        lines.insert(0, "⚠️ <b>Finished with errors</b>")
     fails = [(job[1], err) for job, (ok, err) in zip(upload_jobs, results) if not ok]
     if fails:
         lines.append("")
@@ -1067,10 +1104,10 @@ async def cancel_handler(_, m: Message):
     if not is_authorized(m):
         return await _deny(m)
     token = ((m.text or "").split() or [""])[0].split("@")[0]       # drop args and @botname
-    raw = token.replace("/cancel", "", 1)
-    task_id = raw.split("_", 1)[1] if "_" in raw else raw
-    if not task_id or task_id == "all":
+    mt = _re.match(r"^/(?:cancel|c)\d*_(\S+)", token)               # /c_gid  /cancel_gid  /cancel3_gid
+    if not mt:
         return
+    task_id = mt.group(1)
     _, uid = _who(m)
     await reply_message_async(m, await _cancel_task(task_id, uid), parse_mode=enums.ParseMode.HTML)
 
@@ -1108,9 +1145,16 @@ async def status_callback_handler(app, cq: CallbackQuery):
 # One single message per chat, auto-refreshing, paginated. Stops refreshing by
 # itself once nothing is active (no endless edits / `top` spawns while idle).
 
-DASH_PAGE_SIZE        = 3
+DASH_PAGE_SIZE        = 4   # Leechv2 STATUS_LIMIT (4 keeps the message under Telegram's 4096 chars)
 DASH_REFRESH_INTERVAL = 5   # seconds
 DASH_IDLE_STOP        = 3   # empty refreshes in a row before the loop parks itself
+
+
+def leech_bar(pct):
+    """Leechv2 bar: [⬢⬢⬢⬡⬡...] 12 cells, one cell per 8%."""
+    p = min(max(float(pct or 0), 0), 100)
+    full = int(p // 8)
+    return "[" + "⬢" * full + "⬡" * (12 - full) + "]"
 
 
 def _dashboard_tasks(chat_id):
@@ -1122,99 +1166,123 @@ def _dashboard_tasks(chat_id):
         prog = info.get("progress") or {}
         kind = info["kind"]
         default_status = {"⬇️ DL": "Download", "⬆️ UL": "Upload"}.get(kind, "Extract")
+        out_mode, in_mode = _split_mode(info.get("mode_tag", ""))
         tasks.append({
             "gid": gid, "kind": kind, "name": info.get("name", "?"),
             "done": prog.get("done", 0), "total": prog.get("total", 0), "speed": prog.get("speed", 0),
             "status": info.get("status", default_status),
             "engine": info.get("engine", "?"),
-            "mode_tag": info.get("mode_tag", ""),
+            "in_mode": in_mode, "out_mode": out_mode,
             "extra": info.get("extra", ""),
             "start_time": info.get("start_time", time.time()),
             "user_first": info.get("user_first", "?"),
-            "user_id": info.get("user_id", "?"),
+            "user_id": info.get("user_id", 0),
         })
     return tasks
 
 
+def _sys_snapshot():
+    snap = {"cpu": 0.0, "ram": 0.0, "free": 0, "total": 1, "net_in": 0, "net_out": 0}
+    try:
+        import psutil
+        snap["cpu"] = psutil.cpu_percent(interval=None)
+        snap["ram"] = psutil.virtual_memory().percent
+        n = psutil.net_io_counters()
+        snap["net_in"], snap["net_out"] = n.bytes_recv, n.bytes_sent
+    except Exception:
+        pass
+    try:
+        du = shutil.disk_usage(GLOBAL_STATE["DOWNLOAD_DIR"])
+        snap["free"], snap["total"] = du.free, du.total
+    except Exception:
+        pass
+    return snap
+
+
 async def _get_system_stats(app):
-    """Cheap live system snapshot for the Bot Stats block."""
-    cpu, ram, free_disk, free_pct = "N/A", "N/A", "N/A", "N/A"
-    try:
-        r = await asyncio.to_thread(
-            subprocess.run, ["sh", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'"],
-            capture_output=True, text=True, timeout=5
-        )
-        if r.returncode == 0:
-            cpu = f"{float(r.stdout.strip()):.1f}"
-    except Exception:
-        pass
-    try:
-        r = await asyncio.to_thread(
-            subprocess.run, ["sh", "-c", "free -m | awk 'NR==2{printf \"%.1f\", $3*100/$2}'"],
-            capture_output=True, text=True, timeout=5
-        )
-        if r.returncode == 0:
-            ram = r.stdout.strip()
-    except Exception:
-        pass
-    try:
-        du = await asyncio.to_thread(shutil.disk_usage, GLOBAL_STATE["DOWNLOAD_DIR"])
-        free_disk = f"{du.free / 1024**3:.1f}"
-        free_pct = f"{du.free * 100 / du.total:.0f}"
-    except Exception:
-        pass
-    uptime_str = time_fmt(time.time() - getattr(app, "start_time", time.time()))
-    return cpu, ram, free_disk, free_pct, uptime_str
+    """(cpu%, ram%, free_gb, free_pct, uptime) as display strings."""
+    s = await asyncio.to_thread(_sys_snapshot)
+    return (f"{s['cpu']:.1f}", f"{s['ram']:.1f}", f"{s['free'] / 1024**3:.1f}",
+            f"{s['free'] * 100 / max(s['total'], 1):.0f}", time_fmt(time.time() - BOT_START))
 
 
 async def render_dashboard(app, chat_id, page):
+    """Leechv2 (NEO-WZML) status layout: ⬢⬡ bar, Process/Processed/Status/Speed/Time/Engine/
+    In-Out Mode/User/ID/Stop tree, footer with CPU/RAM/FREE, IN/OUT, DL/UL/UP, ☰ ♻️ buttons."""
     tasks = _dashboard_tasks(chat_id)
-    total_pages = max(1, (len(tasks) + DASH_PAGE_SIZE - 1) // DASH_PAGE_SIZE)
-    page = max(0, min(page, total_pages - 1))
-    page_tasks = tasks[page * DASH_PAGE_SIZE: page * DASH_PAGE_SIZE + DASH_PAGE_SIZE]
+    n = len(tasks)
+    pages = max(1, (n + DASH_PAGE_SIZE - 1) // DASH_PAGE_SIZE)
+    page = (page - 1) % pages + 1 if page > pages else (pages - (abs(page) % pages) if page < 1 else page)
+    start = (page - 1) * DASH_PAGE_SIZE
 
-    dl_speed_total = sum(t["speed"] for t in tasks if t["kind"] == "⬇️ DL")
-    ul_speed_total = sum(t["speed"] for t in tasks if t["kind"] == "⬆️ UL")
+    snap = await asyncio.to_thread(_sys_snapshot)
+    uptime = time_fmt(time.time() - BOT_START)
+    dl_speed = sum(t["speed"] for t in tasks if t["kind"] == "⬇️ DL")
+    ul_speed = sum(t["speed"] for t in tasks if t["kind"] == "⬆️ UL")
 
-    lines = []
-    if not page_tasks:
-        lines.append("✅ No active tasks.")
+    if not tasks:
+        msg = (
+            "<i>No Active Downloads!</i>\n\n"
+            "<blockquote><b><i>Bot Stats</i></b></blockquote>\n"
+            f" • <b>CPU:</b> {snap['cpu']:.1f}% | <b>F:</b> {format_size(snap['free'])} "
+            f"[{snap['free'] * 100 / max(snap['total'], 1):.0f}%]\n"
+            f" • <b>RAM:</b> {snap['ram']:.1f}% | <b>UPTIME:</b> {uptime}"
+        )
     else:
-        for t in page_tasks:
-            name = _html.escape(t["name"][:70])
-            elapsed = time_fmt(int(time.time() - t["start_time"]))
-            eta_sec = (t["total"] - t["done"]) / t["speed"] if t["speed"] > 0 else 0
-            lines.append(f"<b>{name}</b>")
-            lines.append(f"   {progress_bar(t['done'], t['total'])}")
-            lines.append(f"├ <b>Processed:</b> {format_size(t['done'])} of {format_size(t['total'])}")
-            lines.append(f"├ <b>Status:</b> {t['status']} | <b>ETA:</b> {time_fmt(eta_sec)}")
-            lines.append(f"├ <b>Speed:</b> {format_speed(t['speed'])} | <b>Elapsed:</b> {elapsed}")
+        msg = ""
+        for idx, t in enumerate(tasks[start:start + DASH_PAGE_SIZE], start=start + 1):
+            pct = (t["done"] / t["total"] * 100) if t["total"] else 0
+            elapsed = time.time() - t["start_time"]
+            if t["speed"] > 0 and t["total"] > t["done"]:
+                eta = (t["total"] - t["done"]) / t["speed"]
+                eta_str, total_str = time_fmt(eta), time_fmt(elapsed + eta)
+            else:
+                eta_str = total_str = "~"
+            rows = [
+                f"├ {leech_bar(pct)}",
+                f"├ <b>Process :</b> {pct:.2f}%",
+                f"├ <b>Processed :</b> {format_size(t['done'])} of {format_size(t['total'])}",
+                f"├ <b>Status :</b> <i>{_html.escape(t['status'])}...</i>⬘",
+                f"├ <b>Speed :</b> {format_speed(t['speed'])}",
+                f"├ <b>Time :</b> {time_fmt(elapsed)} of {total_str} ( {eta_str} )",
+                f"├ <b>Engine :</b> {_html.escape(str(t['engine']))}",
+                f"├ <b>In Mode :</b> {_html.escape(t['in_mode'])}",
+                f"├ <b>Out Mode :</b> {_html.escape(t['out_mode'])}",
+            ]
             if t["extra"]:
-                lines.append(f"├ {_html.escape(t['extra'])}")
-            lines.append(f"├ <b>Engine:</b> {_html.escape(str(t['engine']))}")
-            if t["mode_tag"]:
-                lines.append(f"├ <b>Mode:</b> {_html.escape(t['mode_tag'])}")
-            lines.append(f"├ <b>User:</b> {_html.escape(str(t['user_first']))} | <b>ID:</b> {t['user_id']}")
-            lines.append(f"└ /cancel_{t['gid']}")
-            lines.append("")
+                rows.append(f"├ {t['extra']}")
+            rows += [
+                f"├ <b>User :</b> {_mention(t['user_first'], t['user_id'])}",
+                f"├ <b>ID :</b> {t['user_id']}",
+                f"└ <b>Stop :</b> /c_{t['gid']}",
+            ]
+            rows[0] = "┌" + rows[0][1:]
+            msg += f"{idx}. {_html.escape(str(t['name'])[:80])}\n" + "\n".join(rows) + "\n\n"
 
-    cpu, ram, free_disk, free_pct, uptime_str = await _get_system_stats(app)
-    lines.append("⬡ <b>Bot Stats</b>")
-    lines.append(f"├ <b>CPU:</b> {cpu}% | <b>F:</b> {free_disk}GB [{free_pct}%]")
-    lines.append(f"├ <b>RAM:</b> {ram}% | <b>UPTIME:</b> {uptime_str}")
-    lines.append(f"└ <b>DL:</b> {format_speed(dl_speed_total)} | <b>UL:</b> {format_speed(ul_speed_total)}")
-    lines.append("")
-    lines.append(f"<b>PAGES</b> {page + 1}/{total_pages}")
+        msg += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        if n > DASH_PAGE_SIZE:
+            msg += f"<b>TASKS:</b> {n}\n"
+        msg += (
+            f"<b>CPU:</b> {snap['cpu']:.1f}% | <b>RAM:</b> {snap['ram']:.1f}% | "
+            f"<b>FREE:</b> {format_size(snap['free'])}\n"
+            f"<b>IN:</b> {format_size(snap['net_in'])} | <b>OUT:</b> {format_size(snap['net_out'])}\n"
+            f"<b>DL:</b> {format_size(dl_speed)}/s | <b>UL:</b> {format_size(ul_speed)}/s | "
+            f"<b>UP:</b> {uptime}"
+        )
 
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⬅️ Prev", callback_data="dash_prev"),
-            InlineKeyboardButton("🔄 Refresh", callback_data="dash_refresh"),
-            InlineKeyboardButton("Next ➡️", callback_data="dash_next"),
-        ],
-        [InlineKeyboardButton("❌ Close", callback_data="dash_close")]
-    ])
-    return "\n".join(lines), keyboard, page
+    if pages > 1:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("☰", callback_data="dash_ov")],
+            [InlineKeyboardButton("❮❮", callback_data="dash_prev"),
+             InlineKeyboardButton(f"♻️ {page}/{pages}", callback_data="dash_refresh"),
+             InlineKeyboardButton("❯❯", callback_data="dash_next")],
+        ])
+    else:
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("☰", callback_data="dash_ov"),
+            InlineKeyboardButton("♻️", callback_data="dash_refresh"),
+        ]])
+    return msg, keyboard, page
 
 
 async def _ensure_dashboard(app, chat_id, force_new=False):
@@ -1235,10 +1303,10 @@ async def _ensure_dashboard(app, chat_id, force_new=False):
         except Exception:
             pass
 
-    text, keyboard, page = await render_dashboard(app, chat_id, 0)
+    text, keyboard, page = await render_dashboard(app, chat_id, 1)
     msg = await app.send_message(chat_id, text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
     gen = time.time()
-    GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 0, "running": True, "gen": gen}
+    GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 1, "running": True, "gen": gen}
     asyncio.create_task(_dashboard_loop(app, chat_id, gen))
 
 
@@ -1269,7 +1337,7 @@ async def dashboard_callback_handler(app, cq: CallbackQuery):
 
     entry = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
     if not entry:
-        return await cq.answer("Dashboard expired — start a new /l, /ql or /qb.", show_alert=True)
+        return await cq.answer("Dashboard expired — start a new /l, /ql, /qb or /y.", show_alert=True)
 
     if cq.data == "dash_close":
         entry["running"] = False
@@ -1280,8 +1348,17 @@ async def dashboard_callback_handler(app, cq: CallbackQuery):
             pass
         return await cq.answer("Closed.")
 
+    if cq.data == "dash_ov":   # ☰ overview popup
+        tasks = _dashboard_tasks(chat_id)
+        c = lambda k: sum(1 for t in tasks if t["kind"] == k)
+        snap = await asyncio.to_thread(_sys_snapshot)
+        txt = (f"Tasks: {len(tasks)} (DL {c('⬇️ DL')} | UL {c('⬆️ UL')} | EX {c('🗜️ EX')})\n"
+               f"CPU {snap['cpu']:.1f}% | RAM {snap['ram']:.1f}%\n"
+               f"FREE {format_size(snap['free'])}\nUP {time_fmt(time.time() - BOT_START)}")
+        return await cq.answer(txt, show_alert=True)
+
     if cq.data == "dash_prev":
-        entry["page"] = max(0, entry["page"] - 1)
+        entry["page"] -= 1
     elif cq.data == "dash_next":
         entry["page"] += 1
 
@@ -1328,6 +1405,7 @@ async def stats_handler(app, m: Message):
         "--- Engines ---\n"
         f"┠ Aria2: <b>v{GLOBAL_STATE.get('ARIA_VER', '?')}</b>\n"
         f"┠ qBittorrent: <b>{qb_line}</b>\n"
+        f"┠ yt-dlp: <b>{ytdl.version()}</b>\n"
         f"┠ Upload: <b>{_html.escape(str(GLOBAL_STATE.get('ENGINE_NAME', '?')))}</b>\n"
         f"┖ Extract: <b>{sevenzip}</b>\n\n"
         "--- Activity ---\n"
@@ -1341,7 +1419,266 @@ async def stats_handler(app, m: Message):
 
 
 
+
+# ================= yt-dlp (/y) =================
+
+def _cookie_hint(err):
+    low = err.lower()
+    if any(k in low for k in ("sign in", "cookies", "login required", "confirm you", "not a bot", "age")):
+        return err + "\n\n🍪 This site wants a logged-in session: send a cookies.txt with /setcookies (see /settings)."
+    return err
+
+
+def _ytdl_tracker(url, outdir, choice, is_playlist, no_playlist, title, cookiefile=None):
+    async def tracker(entry, gid):
+        entry["name"] = title
+        entry["name_locked"] = is_playlist          # keep the playlist title, not each video's
+        fmt, codec, acq = choice
+        try:
+            await asyncio.to_thread(ytdl.download_blocking, url, outdir, fmt, codec, acq,
+                                    is_playlist, entry, no_playlist, cookiefile)
+        except Exception as e:
+            await _rm_paths([outdir])
+            if entry["cancel"]:
+                return {"cancelled": True}
+            return {"ok": False, "err": _cookie_hint(str(e))[:500], "name": title}
+        if entry["cancel"]:
+            await _rm_paths([outdir])
+            return {"cancelled": True}
+        files = await asyncio.to_thread(ytdl.collect_files, outdir)
+        if not files:
+            await _rm_paths([outdir])
+            return {"ok": False, "err": "yt-dlp produced no files (private/removed/geo-blocked video?)", "name": title}
+        return {"ok": True, "gid": gid, "name": title, "paths": files, "cleanup": [outdir]}
+    return tracker
+
+
+async def ytdl_handler(app, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+    if not ytdl.YTDL_AVAILABLE:
+        return await reply_message_async(m, "❌ `yt-dlp` is not installed (`pip install yt-dlp[default]`).",
+                                         parse_mode=enums.ParseMode.MARKDOWN)
+
+    args = list(m.command[1:])
+    no_playlist = "-np" in args
+    args = [a for a in args if a != "-np"]
+    quality = None
+    if "-q" in args:
+        i = args.index("-q")
+        quality = args[i + 1] if i + 1 < len(args) else None
+        args = args[:i] + args[i + 2:]
+    args, rename_to = _extract_rename_flag(args)
+    url = args[0] if args else _link_from_reply(m)
+
+    if not url or not url.startswith(("http://", "https://")):
+        return await reply_message_async(
+            m,
+            "Usage (yt-dlp):\n"
+            "`/y <url>`                — pick quality with buttons\n"
+            "`/y <url> -q 720`         — skip the picker (`best` `audio` `mp3` `720` or a yt-dlp format)\n"
+            "`/y <url> -n <name>`      — rename (single video)\n"
+            "`/y <url> -np`            — single video only, ignore the playlist\n"
+            "Or reply to a message containing a link with `/y`.",
+            parse_mode=enums.ParseMode.MARKDOWN)
+
+    first, uid = _who(m)
+    cookiefile, cookie_src = await us.cookie_for(uid)
+    status = await reply_message_async(
+        m, "🔍 Fetching info…" + (f" 🍪 ({cookie_src} cookies)" if cookiefile else ""), parse_mode=None)
+    try:
+        info = await asyncio.to_thread(ytdl.extract_info, url, no_playlist, cookiefile)
+    except Exception as e:
+        err = _html.escape(_cookie_hint(str(e))[:700])
+        if status:
+            return await edit_message_async(status, f"❌ <b>yt-dlp failed</b>\n<code>{err}</code>",
+                                            parse_mode=enums.ParseMode.HTML)
+        return
+
+    is_playlist = info.get("_type") == "playlist" or "entries" in info
+    title = info.get("title") or info.get("id") or "yt-dlp"
+
+    if quality is not None:
+        choice = ytdl.parse_quality(quality)
+    else:
+        key = ytdl.new_pending(uid)
+        rows = ytdl.picker_buttons(info, key)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(t, callback_data=d) for t, d in row] for row in rows])
+        count = info.get("playlist_count") or len(info.get("entries") or [])
+        head = (f"📋 <b>{_html.escape(title)}</b>\n<i>Playlist · {count} videos</i>" if is_playlist
+                else f"🎬 <b>{_html.escape(title)}</b>")
+        if status:
+            await edit_message_async(status, f"{head}\n\nChoose quality (120s):",
+                                     parse_mode=enums.ParseMode.HTML, reply_markup=kb)
+        pend = ytdl.PENDING[key]
+        try:
+            await asyncio.wait_for(pend["event"].wait(), timeout=120)
+        except asyncio.TimeoutError:
+            ytdl.PENDING.pop(key, None)
+            if status:
+                await edit_message_async(status, "⌛ Timed out. Task cancelled.", parse_mode=None)
+            return
+        choice = pend["choice"]
+        ytdl.PENDING.pop(key, None)
+        if choice is None:
+            if status:
+                await edit_message_async(status, "🛑 Task cancelled.", parse_mode=None)
+            return
+    if status:
+        try:
+            await status.delete()
+        except Exception:
+            pass
+
+    gid = f"yt{int(time.time() * 1000) % 10**9:x}"
+    outdir = os.path.join(GLOBAL_STATE["DOWNLOAD_DIR"], f"ytdl_{gid}")
+    os.makedirs(outdir, exist_ok=True)
+    await _run_task(
+        app, m, gid, _ytdl_tracker(url, outdir, choice, is_playlist, no_playlist, title, cookiefile),
+        False, mode_tag="#Leech | #YtDlp", rename_to=rename_to, engine=f"yt-dlp v{ytdl.version()}"
+    )
+
+
+async def ytq_callback_handler(app, cq: CallbackQuery):
+    parts = (cq.data or "").split()
+    if len(parts) < 3:
+        return await cq.answer()
+    pend = ytdl.PENDING.get(parts[1])
+    if not pend:
+        return await cq.answer("Expired.", show_alert=True)
+    uid = cq.from_user.id if cq.from_user else 0
+    if uid != pend["uid"] and not _is_owner(uid):
+        return await cq.answer("Not your task.", show_alert=True)
+    pend["choice"] = ytdl.decode_choice(parts[2])
+    pend["event"].set()
+    await cq.answer("Cancelled" if pend["choice"] is None else "Starting…")
+
+
+# ================= FILENAME RULES (Leechv2 name swap / prefix / suffix) =================
+
+_RULE_HELP = {
+    "name_swap": (
+        "Name Swap",
+        "Regex swaps on the filename (extension untouched).\n"
+        "Format: <code>pattern:replacement|pattern2:replacement2[:count]</code>\n"
+        "Empty replacement removes the match.\n"
+        "Example: <code>\\[.*?\\]::|www\\.\\S+::|Hindi:Tamil</code>\n"
+        "(removes [brackets] and www urls, swaps Hindi → Tamil)",
+    ),
+    "prefix": ("Prefix", "Text put in front of the filename. <code>\\s</code> = space. Example: <code>@mychannel\\s-\\s</code>"),
+    "suffix": ("Suffix", "Text put after the filename (before the extension). <code>\\s</code> = space. Example: <code>\\s[1080p]</code>"),
+}
+
+
+async def _rule_cmd(m, key):
+    if not is_authorized(m):
+        return await _deny(m)
+    _, uid = _who(m)
+    label, help_text = _RULE_HELP[key]
+    parts = (m.text or "").split(None, 1)
+    value = parts[1].strip() if len(parts) > 1 else ""
+    cmd = {"name_swap": "setswap", "prefix": "setprefix", "suffix": "setsuffix"}[key]
+    cur = (await us.get(uid)).get(key, "")
+    if not value:
+        return await reply_message_async(
+            m, f"<b>{label}</b>\nCurrent: <code>{_html.escape(cur) if cur else 'none'}</code>\n\n{help_text}\n\n"
+               f"Set: <code>/{cmd} &lt;value&gt;</code>   Clear: <code>/{cmd} clear</code>",
+            parse_mode=enums.ParseMode.HTML)
+    if value.lower() in ("clear", "none", "off", "del"):
+        await us.set_rule(uid, key, "")
+        return await reply_message_async(m, f"🗑 {label} cleared.", parse_mode=None)
+    if key == "name_swap":
+        err = validate_swap(value)
+        if err:
+            return await reply_message_async(m, f"❌ {err}", parse_mode=None)
+    await us.set_rule(uid, key, value)
+    await reply_message_async(m, f"✅ {label} saved: <code>{_html.escape(value)}</code>", parse_mode=enums.ParseMode.HTML)
+
+
+async def setswap_handler(_, m: Message):
+    await _rule_cmd(m, "name_swap")
+
+
+async def setprefix_handler(_, m: Message):
+    await _rule_cmd(m, "prefix")
+
+
+async def setsuffix_handler(_, m: Message):
+    await _rule_cmd(m, "suffix")
+
+
+
+# ================= yt-dlp COOKIES (Leechv2 logic, stored in MongoDB) =================
+
+async def setcookies_handler(app, m: Message):
+    """Reply to a cookies.txt (or send it with the caption /setcookies). Owner: `/setcookies default`."""
+    if not is_authorized(m):
+        return await _deny(m)
+    _, uid = _who(m)
+    want_default = len(m.command) > 1 and m.command[1].lower() == "default"
+    if want_default and not _is_owner(uid):
+        return await reply_message_async(m, "⛔ Only the owner can set the default cookies.", parse_mode=None)
+
+    doc = m.document or (m.reply_to_message.document if m.reply_to_message else None)
+    if not doc:
+        return await reply_message_async(
+            m,
+            "🍪 <b>yt-dlp cookies</b>\n"
+            "Reply to a <code>cookies.txt</code> (Netscape format) with <code>/setcookies</code>, "
+            "or send the file with that caption.\n"
+            "Export it from a logged-in browser with a “Get cookies.txt” extension.\n"
+            "Owner: <code>/setcookies default</code> sets the bot-wide file.\n"
+            "Remove: <code>/delcookies</code>  (<code>/delcookies default</code>)\n\n"
+            "<i>Do this in a private chat — cookies are your login.</i>",
+            parse_mode=enums.ParseMode.HTML)
+    try:
+        buf = await app.download_media(doc, in_memory=True)
+        data = bytes(buf.getbuffer())
+    except Exception as e:
+        return await reply_message_async(m, f"❌ Couldn't read the file: {e}", parse_mode=None)
+    err = us.valid_cookies(data)
+    if err:
+        return await reply_message_async(m, f"❌ {err}", parse_mode=None)
+    if want_default:
+        await us.set_default_cookie(data)
+        label = "Default cookies saved (everyone without personal cookies uses them)."
+    else:
+        await us.set_cookie(uid, data)
+        label = "Your cookies saved. yt-dlp will use them for your downloads."
+    # don't leave a login file lying in the chat
+    for msg in (m, m.reply_to_message):
+        if msg and msg.document:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+    await app.send_message(m.chat.id, f"✅ {label}")
+
+
+async def delcookies_handler(_, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+    _, uid = _who(m)
+    if len(m.command) > 1 and m.command[1].lower() == "default":
+        if not _is_owner(uid):
+            return await reply_message_async(m, "⛔ Owner only.", parse_mode=None)
+        await us.del_default_cookie()
+        return await reply_message_async(m, "🗑 Default cookies removed.", parse_mode=None)
+    await us.del_cookie(uid)
+    await reply_message_async(m, "🗑 Your cookies removed.", parse_mode=None)
+
+
 # ================= USER SETTINGS (upload type + thumbnail) =================
+
+def _cookie_status(prefs):
+    mine = bool(prefs.get("cookie"))
+    dflt = us.default_cookie_exists()
+    if mine and not prefs.get("use_default_cookie"):
+        return "🍪 personal ✅ (in use)" + (" · default available" if dflt else "")
+    if dflt:
+        return "🍪 default ✅ (in use)" + (" · personal saved" if mine else "")
+    return "❌ none"
+
 
 def _settings_view(prefs):
     mode = prefs["mode"]
@@ -1350,9 +1687,15 @@ def _settings_view(prefs):
         f"┠ Upload as: <b>{'🎬 Video' if mode == 'video' else '📄 Document'}</b>\n"
         f"┠ Thumbnail: <b>{'✅ set' if prefs['thumb'] else '❌ none (auto from video)'}</b>\n"
         f"┠ Leech dump: <b>{('<code>%s</code>' % prefs['dump']) if prefs['dump'] else ('<code>%s</code> (global)' % config.LEECH_DUMP if config.LEECH_DUMP else '❌ none (same chat)')}</b>\n"
+        f"┠ Prefix: <code>{_html.escape(prefs.get('prefix') or config.LEECH_PREFIX or 'none')}</code>\n"
+        f"┠ Suffix: <code>{_html.escape(prefs.get('suffix') or config.LEECH_SUFFIX or 'none')}</code>\n"
+        f"┠ Name Swap: <code>{_html.escape(prefs.get('name_swap') or config.LEECH_NAME_SWAP or 'none')}</code>\n"
+        f"┠ yt-dlp cookies: <b>{_cookie_status(prefs)}</b>\n"
         f"┖ Saved in: <b>{us.backend()}</b>\n\n"
         "Thumb: reply to a photo with /setthumb\n"
-        "Dump: /setdump &lt;chat_id&gt; (or /setdump here inside the group/channel)"
+        "Dump: /setdump &lt;chat_id&gt; (or /setdump here inside the group/channel)\n"
+        "Names: /setswap  /setprefix  /setsuffix\n"
+        "Cookies: reply to a cookies.txt with /setcookies"
     )
     rows = [[
         InlineKeyboardButton(("✅ " if mode == "doc" else "") + "📄 Document", callback_data="us_doc"),
@@ -1363,6 +1706,12 @@ def _settings_view(prefs):
                      InlineKeyboardButton("🗑 Delete thumb", callback_data="us_del")])
     if prefs["dump"]:
         rows.append([InlineKeyboardButton("🗑 Clear dump", callback_data="us_deldump")])
+    if prefs.get("cookie"):
+        use = "Use default 🍪" if not prefs.get("use_default_cookie") and us.default_cookie_exists() else "Use mine 🍪"
+        row = [InlineKeyboardButton("🗑 Delete my cookies", callback_data="us_ckdel")]
+        if us.default_cookie_exists():
+            row.insert(0, InlineKeyboardButton(use, callback_data="us_cktoggle"))
+        rows.append(row)
     rows.append([InlineKeyboardButton("❌ Close", callback_data="us_close")])
     return text, InlineKeyboardMarkup(rows)
 
@@ -1460,12 +1809,184 @@ async def settings_callback_handler(app, cq: CallbackQuery):
         await us.del_thumb(uid)
     elif cq.data == "us_deldump":
         await us.set_dump(uid, 0)
+    elif cq.data == "us_cktoggle":
+        await us.set_use_default(uid, not prefs.get("use_default_cookie"))
+    elif cq.data == "us_ckdel":
+        await us.del_cookie(uid)
     text, kb = _settings_view(await us.get(uid))
     try:
         await cq.edit_message_text(text, parse_mode=enums.ParseMode.HTML, reply_markup=kb)
     except Exception:
         pass
     await cq.answer("Saved")
+
+
+
+# ================= OWNER TOOLS: restart, log, authorize =================
+
+RESTART_FILE = ".restartmsg"
+
+
+async def restart_handler(_, m: Message):
+    _, uid = _who(m)
+    if not _is_owner(uid):
+        return await reply_message_async(m, "⛔ Owner only.", parse_mode=None)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Yes!", callback_data="botrestart confirm"),
+                                InlineKeyboardButton("No!", callback_data="botrestart cancel")]])
+    await reply_message_async(m, "<i>Are you really sure you want to restart the bot ?</i>",
+                              parse_mode=enums.ParseMode.HTML, reply_markup=kb)
+
+
+async def restart_callback_handler(app, cq: CallbackQuery):
+    uid = cq.from_user.id if cq.from_user else 0
+    if not _is_owner(uid):
+        return await cq.answer("Owner only.", show_alert=True)
+    if cq.data.endswith("cancel"):
+        await cq.answer()
+        try:
+            return await cq.message.delete()
+        except Exception:
+            return
+    await cq.answer("Restarting…")
+    try:
+        await cq.edit_message_text("<i>Restarting...</i>", parse_mode=enums.ParseMode.HTML)
+    except Exception:
+        pass
+    # drop every running transfer so nothing is orphaned in aria2 / qBittorrent
+    try:
+        for dl in await asyncio.to_thread(ARIA2_API.get_downloads):
+            try:
+                await asyncio.to_thread(ARIA2_API.remove, [dl], force=True, files=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        if qb.QBIT_AVAILABLE and await qb.ping():
+            c = await qb.get_client()
+            hashes = [t.hash for t in await c.torrents.info()]
+            if hashes:
+                await c.torrents.delete(hashes, True)
+    except Exception:
+        pass
+    try:
+        with open(RESTART_FILE, "w") as f:
+            json.dump([cq.message.chat.id, cq.message.id], f)
+    except Exception:
+        pass
+    await asyncio.sleep(1)
+    os.execl(sys.executable, sys.executable, *sys.argv)
+
+
+async def log_handler(app, m: Message):
+    _, uid = _who(m)
+    if not _is_owner(uid):
+        return await reply_message_async(m, "⛔ Owner only.", parse_mode=None)
+    if not os.path.exists("bot.log"):
+        return await reply_message_async(m, "No bot.log yet.", parse_mode=None)
+    tail = "bot.tail.log"
+    def cut():
+        with open("bot.log", "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 1_500_000))
+            data = f.read()
+        with open(tail, "wb") as f:
+            f.write(data)
+    await asyncio.to_thread(cut)
+    try:
+        await app.send_document(m.chat.id, tail, caption="📑 Bot log (last 1.5MB)", reply_to_message_id=m.id)
+    finally:
+        await asyncio.to_thread(_rm_path, tail)
+
+
+async def _auth_cmd(m: Message, grant: bool):
+    _, uid = _who(m)
+    if not _is_owner(uid):
+        return await reply_message_async(m, "⛔ Owner only.", parse_mode=None)
+    r = m.reply_to_message
+    if r and r.from_user:
+        target, label = r.from_user.id, f"user {r.from_user.id}"
+        lst = config.AUTH_USERS
+    else:
+        target, label = m.chat.id, f"chat {m.chat.id}"
+        lst = config.AUTH_CHATS
+    if grant and target not in lst:
+        lst.append(target)
+    elif not grant and target in lst:
+        lst.remove(target)
+    await us.save_auth(config.AUTH_USERS, config.AUTH_CHATS)
+    await reply_message_async(m, f"{'✅ Authorized' if grant else '🗑 Removed'} {label}.", parse_mode=None)
+
+
+async def authorize_handler(_, m: Message):
+    await _auth_cmd(m, True)
+
+
+async def unauthorize_handler(_, m: Message):
+    await _auth_cmd(m, False)
+
+
+# Leechv2-style "/" menu. First name of each command is what Telegram lists.
+BOT_COMMANDS = [
+    ("leech", "[link/file] Leech files to Upload to Telegram"),
+    ("unzipleech", "[link/file] Leech and extract archive"),
+    ("qbleech", "[magnet/torrent] Leech files to Upload to Telegram using qbit"),
+    ("qbunzipleech", "[magnet/torrent] QBit Leech and extract archive"),
+    ("aria", "[magnet/torrent] Leech a magnet using Aria2"),
+    ("ytdlleech", "[link] Leech YouTube, m3u8, Social Media and yt-dlp supported urls"),
+    ("usetting", "User personal settings"),
+    ("setthumb", "[reply to photo] Set your custom thumbnail"),
+    ("setdump", "[chat_id|here] Set your leech dump chat"),
+    ("setswap", "[pattern:replacement|...] Filename Name Swap (regex)"),
+    ("setprefix", "[text] Filename prefix"),
+    ("setsuffix", "[text] Filename suffix"),
+    ("setcookies", "[reply to cookies.txt] Set yt-dlp cookies"),
+    ("delcookies", "Remove your yt-dlp cookies"),
+    ("ping", "Ping Bot to test Response Speed"),
+    ("status", "[id/me] Tasks Status of Bot"),
+    ("stats", "Bot, OS, Repo & System full Statistics"),
+    ("cancelall", "Cancel all Tasks on the Bot"),
+    ("help", "Detailed help usage of the bot"),
+    ("authorize", "[OWNER] Authorize a chat or a replied user"),
+    ("unauthorize", "[OWNER] Remove authorization"),
+    ("log", "[OWNER] Get Bot Logs for Internal Working"),
+    ("restart", "[OWNER] Reboot bot"),
+]
+
+
+async def on_startup(app):
+    """Called once after the client connects: saved auth, command menu, restart notice."""
+    users, chats = await us.load_auth()
+    for u in users:
+        if u not in config.AUTH_USERS:
+            config.AUTH_USERS.append(u)
+    for c in chats:
+        if c not in config.AUTH_CHATS:
+            config.AUTH_CHATS.append(c)
+
+    if await us.load_default_cookie():
+        print("✅ Default yt-dlp cookies restored from MongoDB")
+
+    if config.SET_COMMANDS:
+        try:
+            await app.set_bot_commands([BotCommand(n, d) for n, d in BOT_COMMANDS])
+            print(f"✅ Bot command menu set ({len(BOT_COMMANDS)} commands)")
+        except Exception as e:
+            print(f"⚠️ set_bot_commands failed: {e}")
+
+    if os.path.exists(RESTART_FILE):
+        try:
+            chat_id, msg_id = json.load(open(RESTART_FILE))
+            now = time.strftime("%d/%m/%y"), time.strftime("%I:%M:%S %p"), time.strftime("%Z") or "UTC"
+            await app.edit_message_text(
+                chat_id, msg_id,
+                "<blockquote><b><i>Restarted Successfully!</i></b></blockquote>\n"
+                f" • <b>Date:</b> {now[0]}\n • <b>Time:</b> {now[1]}\n • <b>TimeZone:</b> {now[2]}",
+                parse_mode=enums.ParseMode.HTML)
+        except Exception as e:
+            print(f"⚠️ restart notice failed: {e}")
+        finally:
+            _rm_path(RESTART_FILE)
 
 
 # ================= REGISTRATION =================
@@ -1475,35 +1996,55 @@ def register_handlers(app, aria2_api, state_vars):
     ARIA2_API = aria2_api
     GLOBAL_STATE = state_vars
 
-    app.on_message(filters.command(["start", "help"]))(start_handler)
-    app.on_message(filters.command("ping"))(ping_handler)
-    app.on_message(filters.command("cancelall"))(cancelall_handler)
-    app.on_message(filters.regex(r"^/cancel(?!all)"))(cancel_handler)
+    # command names follow Leechv2's BotCommands exactly
+    cmd = filters.command
+    app.on_message(cmd("start"))(start_handler)
+    app.on_message(cmd(["help", "h"]))(help_handler)
+    app.on_message(cmd("ping"))(ping_handler)
+    app.on_message(cmd(["cancelall", "call"]))(cancelall_handler)
+    app.on_message(filters.regex(r"^/(?:cancel|c)\d*_\S+"))(cancel_handler)
+    app.on_message(cmd(["restart", "r", "restartall"]))(restart_handler)
+    app.on_message(cmd("log"))(log_handler)
+    app.on_message(cmd(["authorize", "a"]))(authorize_handler)
+    app.on_message(cmd(["unauthorize", "ua"]))(unauthorize_handler)
+
     app.on_callback_query(filters.regex("^status_"))(status_callback_handler)
     app.on_callback_query(filters.regex("^dash_"))(dashboard_callback_handler)
     app.on_callback_query(filters.regex("^us_"))(settings_callback_handler)
-    app.on_message(filters.command(["settings", "usettings", "st"]))(settings_handler)
-    app.on_message(filters.command("setthumb"))(setthumb_handler)
-    app.on_message(filters.command("delthumb"))(delthumb_handler)
-    app.on_message(filters.command("setdump"))(setdump_handler)
-    app.on_message(filters.command("deldump"))(deldump_handler)
+    app.on_callback_query(filters.regex("^ytq "))(ytq_callback_handler)
+    app.on_callback_query(filters.regex("^botrestart"))(restart_callback_handler)
 
-    @app.on_message(filters.command(["l", "leech"]))
+    app.on_message(cmd(["settings", "usetting", "us"]))(settings_handler)
+    app.on_message(cmd("setthumb"))(setthumb_handler)
+    app.on_message(cmd("delthumb"))(delthumb_handler)
+    app.on_message(cmd("setdump"))(setdump_handler)
+    app.on_message(cmd("deldump"))(deldump_handler)
+    app.on_message(cmd("setswap"))(setswap_handler)
+    app.on_message(cmd("setprefix"))(setprefix_handler)
+    app.on_message(cmd("setsuffix"))(setsuffix_handler)
+    app.on_message(cmd("setcookies"))(setcookies_handler)
+    app.on_message(cmd("delcookies"))(delcookies_handler)
+
+    @app.on_message(cmd(["leech", "l", "unzipleech", "uzl"]))
     async def leech_wrapper(client, message):
         await leech_handler(client, message)
 
-    @app.on_message(filters.command("ql"))
-    async def ql_wrapper(client, message):
-        await ql_handler(client, message)
-
-    @app.on_message(filters.command(["qb", "qbleech"]))
+    @app.on_message(cmd(["qbleech", "ql", "qb", "qbunzipleech", "quzl"]))
     async def qb_wrapper(client, message):
         await qb_handler(client, message)
 
-    @app.on_message(filters.command("status"))
+    @app.on_message(cmd(["aria", "al"]))
+    async def aria_wrapper(client, message):
+        await ql_handler(client, message)
+
+    @app.on_message(cmd(["ytdl", "y", "ytdlleech", "yl"]))
+    async def ytdl_wrapper(client, message):
+        await ytdl_handler(client, message)
+
+    @app.on_message(cmd(["status", "s", "statusall", "sall"]))
     async def status_wrapper(client, message):
         await status_handler(client, message)
 
-    @app.on_message(filters.command("stats"))
+    @app.on_message(cmd(["stats", "st"]))
     async def stats_wrapper(client, message):
         await stats_handler(client, message)

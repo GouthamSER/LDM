@@ -4,11 +4,12 @@ import os
 import time
 import threading
 import shutil
+import sys
 import aria2p
-from pyrogram import Client
+from pyrogram import Client, idle
 
 # --- Modular Imports ---
-from plugins.commands import register_handlers
+from plugins.commands import register_handlers, on_startup
 try:
     from plugins.weblive import start_web_server_thread
     UVICORN_AVAILABLE = True
@@ -16,6 +17,32 @@ except ImportError:
     print("WARNING: Could not import web server module 'plugins.weblive'. Health check will not run.")
     UVICORN_AVAILABLE = False
 # -----------------------
+
+# ---- tee stdout/stderr into bot.log so /log can send it ----
+class _Tee:
+    def __init__(self, stream, fh):
+        self._s, self._f = stream, fh
+    def write(self, data):
+        try:
+            self._s.write(data)
+            self._f.write(data)
+            self._f.flush()
+        except Exception:
+            pass
+    def flush(self):
+        try:
+            self._s.flush()
+        except Exception:
+            pass
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+try:
+    _logfh = open("bot.log", "w", buffering=1)
+    sys.stdout = _Tee(sys.stdout, _logfh)
+    sys.stderr = _Tee(sys.stderr, _logfh)
+except Exception:
+    pass
 
 # ================= CONFIG (single source of truth: config.py) =================
 import config
@@ -109,4 +136,14 @@ if __name__ == "__main__":
     if UVICORN_AVAILABLE:
         start_web_server_thread(HEALTH_PORT)
     
-    app.run()
+    async def _main():
+        await app.start()
+        try:
+            await on_startup(app)      # command menu + restart notice + saved auth
+        except Exception as e:
+            print(f"⚠️ startup hook failed: {e}")
+        print("✅ Bot is up.")
+        await idle()
+        await app.stop()
+
+    app.run(_main())
