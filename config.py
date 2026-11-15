@@ -94,7 +94,11 @@ AUTH_CHATS = _id_list("AUTH_CHATS")
 # Upload behaviour
 # =================
 # Parallel Telegram uploads
-MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 4))
+# Default 2: more parallel uploads trips Telegram's FLOOD_WAIT on upload.SaveBigFilePart
+# (the lib auto-retries, but speed drops). Raise only on a strong connection.
+MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 2))
+# Parallel file-part streams per upload inside the Telegram client (1 = safest vs FLOOD_WAIT)
+MAX_TRANSMISSIONS = int(get_env_variable("MAX_TRANSMISSIONS", 1))
 # Files bigger than this are split into .001 .002 ... parts (bytes).
 # Default 1.95GiB (safe for the 2GB bot limit). Premium uploader: 3.9GiB. 0 = never split.
 SPLIT_SIZE = int(get_env_variable("SPLIT_SIZE", int(1.95 * 1024**3)))
