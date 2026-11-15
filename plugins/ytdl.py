@@ -167,22 +167,28 @@ def new_pending(uid):
 def download_blocking(url, outdir, fmt, codec, acq, is_playlist, entry, no_playlist, cookiefile=None):
     """Runs in a worker thread. On "Requested format is not available" retries with looser
     formats (then without cookies: stale/limited-account cookies can hide formats)."""
-    attempts = [(fmt, cookiefile), ("bv*+ba/b/best", cookiefile)]
+    loose = "bv*+ba/b/best"
+    attempts = [(fmt, cookiefile, None), (loose, cookiefile, None)]
+    # other YouTube player clients expose formats the default one hides
+    for clients in (["tv", "web_safari"], ["android_vr"], ["mweb"], ["ios"]):
+        attempts.append((loose, cookiefile, clients))
     if cookiefile:
-        attempts.append(("bv*+ba/b/best", None))
+        attempts.append((loose, None, None))
+        attempts.append((loose, None, ["android_vr"]))
     last = None
-    for f, ck in attempts:
+    for f, ck, clients in attempts:
         try:
-            return _download_once(url, outdir, f, codec, acq, is_playlist, entry, no_playlist, ck)
+            return _download_once(url, outdir, f, codec, acq, is_playlist, entry, no_playlist, ck, clients)
         except Exception as e:
             last = e
             if "format is not available" not in str(e).lower() or entry.get("cancel"):
                 raise
-            print(f"⚠️ yt-dlp format '{f}' (cookies={bool(ck)}) unavailable, retrying looser")
+            print(f"⚠️ yt-dlp fmt={f!r} cookies={bool(ck)} clients={clients} unavailable, next")
     raise last
 
 
-def _download_once(url, outdir, fmt, codec, acq, is_playlist, entry, no_playlist, cookiefile=None):
+def _download_once(url, outdir, fmt, codec, acq, is_playlist, entry, no_playlist, cookiefile=None,
+                   clients=None):
     state = {"base": 0, "last": 0}
 
     def hook(d):
@@ -212,6 +218,8 @@ def _download_once(url, outdir, fmt, codec, acq, is_playlist, entry, no_playlist
             entry["status"] = "Processing"
 
     opts = base_opts(cookiefile)
+    if clients:
+        opts["extractor_args"] = {"youtube": {"player_client": clients}}
     opts.update({
         "progress_hooks": [hook],
         "postprocessor_hooks": [pp_hook],
