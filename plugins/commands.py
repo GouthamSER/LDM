@@ -559,6 +559,11 @@ async def ping_handler(_, m):
 
 # ----- Aria2: /l (direct link) -----
 
+# Telegram->bot downloads: a few at a time only. Many parallel GetFile streams (e.g. /l -i 20)
+# trigger FLOOD_WAIT "Waiting for N seconds (required by upload.GetFile)".
+TG_DL_SEM = asyncio.Semaphore(max(1, int(getattr(config, "MAX_TG_DOWNLOADS", 2))))
+
+
 def _tg_tracker(app, src):
     """Download a Telegram file (reply source) into the shared pipeline."""
     async def tracker(entry, gid):
@@ -570,23 +575,43 @@ def _tg_tracker(app, src):
             entry["fail_reason"] = f"Not enough disk space for {format_size(size)}"
             return {"ok": False, "err": "no disk space", "name": name}
         folder = os.path.join(GLOBAL_STATE["DOWNLOAD_DIR"], f"tg_{gid}")
-        os.makedirs(folder, exist_ok=True)
         target = os.path.join(folder, name)
-        t0 = time.time()
 
-        def progress(cur, tot):
-            if entry.get("cancel"):
-                raise Exception("Download cancelled by user.")
-            el = time.time() - t0
-            entry["progress"] = {"done": cur, "total": tot or size, "speed": cur / el if el > 0 else 0}
-
+        # wait for a free download slot (cancel works while queued)
+        entry["status"] = "Queued"
+        while True:
+            try:
+                await asyncio.wait_for(TG_DL_SEM.acquire(), timeout=1)
+                break
+            except asyncio.TimeoutError:
+                if entry.get("cancel"):
+                    return {"cancelled": True}
         try:
-            path = await app.download_media(src, file_name=target, progress=progress)
-        except Exception as e:
-            await _rm_paths([folder])
-            if entry.get("cancel"):
-                return {"cancelled": True}
-            return {"ok": False, "err": str(e) or e.__class__.__name__, "name": name}
+            entry["status"] = "Download"
+            os.makedirs(folder, exist_ok=True)
+            t0 = time.time()
+
+            def progress(cur, tot):         # never raises: cancel = task.cancel() below, no log spam
+                el = time.time() - t0
+                entry["progress"] = {"done": cur, "total": tot or size, "speed": cur / el if el > 0 else 0}
+
+            dl_task = asyncio.create_task(app.download_media(src, file_name=target, progress=progress))
+            while not dl_task.done():
+                await asyncio.wait({dl_task}, timeout=1)
+                if entry.get("cancel") and not dl_task.done():
+                    dl_task.cancel()
+                    break
+            try:
+                path = await dl_task
+            except asyncio.CancelledError:
+                path = None
+                if not entry.get("cancel"):
+                    raise                   # the whole task was cancelled from outside
+            except Exception as e:
+                await _rm_paths([folder])
+                return {"ok": False, "err": str(e) or e.__class__.__name__, "name": name}
+        finally:
+            TG_DL_SEM.release()
         if entry.get("cancel"):
             await _rm_paths([folder])
             return {"cancelled": True}

@@ -123,6 +123,8 @@ AUTH_CHATS = _id_list("AUTH_CHATS")
 # Max files uploading at once across ALL tasks. 0 = no cap (Leechv2 style: each task uploads its
 # files one by one, tasks run in parallel and share the bandwidth).
 MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 0))
+# Telegram files downloaded at once (reply-to-file leech, /l -i N). Lower = fewer FLOOD_WAITs.
+MAX_TG_DOWNLOADS = int(get_env_variable("MAX_TG_DOWNLOADS", 2))
 # Parallel file-part streams per upload inside the Telegram client (1 = safest vs FLOOD_WAIT)
 MAX_TRANSMISSIONS = int(get_env_variable("MAX_TRANSMISSIONS", 1))
 # Files bigger than this are split into .001 .002 ... parts (bytes).
