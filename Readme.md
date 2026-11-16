@@ -10,7 +10,7 @@ Telegram leech bot (wzgram / Pyrogram) that downloads with **Aria2**, **qBittorr
 - **Leechv2 dashboard:** `/status` with ⬢⬡ bars, speed, ETA, engine, CPU / RAM / disk footer, refresh and overview buttons
 - **Uploads:** each task sends its files one by one; different tasks upload at the same time and share bandwidth. Auto retry (FloodWait / network), auto split over `SPLIT_SIZE` (`.001 .002 …`)
 - **Per-user settings** (`/settings`): upload as Document or Video, thumbnail, leech dump chat, prefix / suffix / name swap, caption, yt-dlp cookies. Saved in MongoDB, or a local JSON file if no `DATABASE_URL`
-- **Extract:** zip / rar-like / 7z / tar archives with `/unzipleech` (`-e`)
+- **Extract:** zip / 7z / tar / tar.gz / tar.bz2 / tar.xz archives with `/unzipleech` (`-e`) using py7zr, zipfile and tarfile. No `.rar`
 - **Safety:** owner + authorized users / chats only, disk-space check, cleanup of leftovers, cancel at any stage
 - **Auto "/" command menu** pushed to Telegram on every start
 
@@ -29,11 +29,13 @@ Telegram leech bot (wzgram / Pyrogram) that downloads with **Aria2**, **qBittorr
 | `/setdump <chat_id\|here>` `/deldump` | leech dump chat |
 | `/setswap` `/setprefix` `/setsuffix` `/setcaption` | filename rules and caption (`clear` removes) |
 | `/setcookies` `/delcookies` | yt-dlp cookies |
+| `/l` (reply to a Telegram file) | re-upload a Telegram file with rename / extract / zip / caption rules |
+| `/l -i 5` (reply to the first file/link) | multi: leech that message and the next 4 (max 20, one task each) |
 | `/stats` `/st` · `/ping` · `/help` `/h` | info |
 | `/authorize` `/a` · `/unauthorize` `/ua` | owner: allow / remove a user or chat |
 | `/log` · `/restart` `/r` `/restartall` | owner: log file, reboot |
 
-Flags: `-e` extract · `-n <name>` rename (single file, keep last) · yt-dlp: `-q 720|best|audio|mp3|<format>` `-np` (no playlist)
+Flags: `-z [password]` pack into one archive (no password = `.zip` stored, with password = AES-256 `.7z`; works on `/l` `/qb` `/aria` `/y`) · `-i N` multi · `-e` extract · `-n <name>` rename (single file, keep last) · yt-dlp: `-q 720|best|audio|mp3|<format>` `-np` (no playlist)
 
 ## 🔤 Name rules
 
