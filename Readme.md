@@ -109,6 +109,12 @@ bash start.sh
 
 Files: `Procfile`, `runtime.txt`, `Aptfile` (aria2, ffmpeg, psmisc; needs the apt buildpack), `bin/post_compile` (downloads static qBittorrent and deno into `./bin`). `start.sh` puts `./bin` and `.apt` on `PATH`. If your platform ignores `Aptfile`, use the Docker route instead.
 
+## 🔐 Secrets: `config.env`
+
+Put `API_ID`, `API_HASH`, `BOT_TOKEN`, `OWNER_ID`, `DATABASE_URL` … in **`config.env`** (copy `config.sample.env`), not in `config.py`. `config.env` is in `.gitignore` and is never touched by auto-update, so a restart can never wipe your credentials. Real environment variables (Docker `-e`, Koyeb dashboard) override it.
+
+Already edited `config.py` directly? On the first auto-update, the values you changed (API_ID, API_HASH, BOT_TOKEN, OWNER_ID …) are copied into `config.env` before `config.py` is replaced. If that cannot be verified, your old `config.py` is kept instead. A copy always goes to `.update_backup/`.
+
 ## 🔧 Environment variables
 
 | Variable | Default | Description |

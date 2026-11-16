@@ -1,5 +1,31 @@
 import os
 
+# =================
+# config.env (Leechv2 style): put your secrets here, NOT in this file.
+# update.py replaces config.py on every restart, but never touches config.env.
+# Real environment variables (Docker -e, Koyeb dashboard) win over config.env.
+# Copy config.sample.env -> config.env and fill it in.
+# =================
+def _load_env_file(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key, val = key.strip(), val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
+                if key:
+                    os.environ.setdefault(key, val)
+    except OSError:
+        pass
+
+
+_load_env_file(os.environ.get("CONFIG_ENV_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.env")))
+
+
 def get_env_variable(var_name, default_value=None):
     return os.environ.get(var_name, default_value)
 

@@ -47,6 +47,12 @@ except Exception:
 # ================= CONFIG (single source of truth: config.py) =================
 import config
 
+if config.API_ID == 1234567 or config.API_HASH == "YOUR_API_HASH" or config.BOT_TOKEN == "YOUR_BOT_TOKEN":
+    print("❌ API_ID / API_HASH / BOT_TOKEN are not set.\n"
+          "   Copy config.sample.env to config.env, fill it in, and start again\n"
+          "   (or set them as environment variables).")
+    sys.exit(1)
+
 API_ID       = config.API_ID
 API_HASH     = config.API_HASH
 BOT_TOKEN    = config.BOT_TOKEN
