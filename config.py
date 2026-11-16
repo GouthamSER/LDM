@@ -124,9 +124,9 @@ AUTH_CHATS = _id_list("AUTH_CHATS")
 # files one by one, tasks run in parallel and share the bandwidth).
 MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 0))
 # Telegram files downloaded at once (reply-to-file leech, /l -i N). Lower = fewer FLOOD_WAITs.
-MAX_TG_DOWNLOADS = int(get_env_variable("MAX_TG_DOWNLOADS", 2))
+MAX_TG_DOWNLOADS = int(get_env_variable("MAX_TG_DOWNLOADS", 0))
 # Parallel file-part streams per upload inside the Telegram client (1 = safest vs FLOOD_WAIT)
-MAX_TRANSMISSIONS = int(get_env_variable("MAX_TRANSMISSIONS", 1))
+MAX_TRANSMISSIONS = int(get_env_variable("MAX_TRANSMISSIONS", 0))
 # Files bigger than this are split into .001 .002 ... parts (bytes).
 # Default 1.95GiB (safe for the 2GB bot limit). Premium uploader: 3.9GiB. 0 = never split.
 SPLIT_SIZE = int(get_env_variable("SPLIT_SIZE", int(1.95 * 1024**3)))
