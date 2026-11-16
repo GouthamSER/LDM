@@ -110,6 +110,47 @@ def _extract_rename_flag(args):
     rename_to = " ".join(args[idx + 1:]).strip() or None
     return args[:idx], rename_to
 
+def _parse_multi(args):
+    """Pull `-i N` (multi: this message and the next N-1) out of an arg list -> (args, n|0)."""
+    if "-i" not in args:
+        return args, 0
+    i = args.index("-i")
+    n = 0
+    if i + 1 < len(args) and args[i + 1].isdigit():
+        n = int(args[i + 1])
+        args = args[:i] + args[i + 2:]
+    else:
+        args = args[:i] + args[i + 1:]
+        n = 1
+    return args, max(n, 0)
+
+
+def _parse_zip(args):
+    """Pull `-z [password]` out of an arg list -> (args, None | password-or-"").
+    The password is the token after -z unless it is another flag or a link."""
+    if "-z" not in args:
+        return args, None
+    i = args.index("-z")
+    pw = ""
+    if i + 1 < len(args) and not args[i + 1].startswith("-") and not _URL_RE.match(args[i + 1]):
+        pw = args[i + 1]
+        return args[:i] + args[i + 2:], pw
+    return args[:i] + args[i + 1:], pw
+
+
+def _tg_media(msg):
+    """(media_obj, filename) for a Telegram message that carries a file, else (None, None)."""
+    if not msg or getattr(msg, "empty", False):
+        return None, None
+    for attr, ext in (("document", ""), ("video", ".mp4"), ("audio", ".mp3"), ("animation", ".mp4"),
+                      ("voice", ".ogg"), ("video_note", ".mp4"), ("photo", ".jpg")):
+        obj = getattr(msg, attr, None)
+        if obj:
+            name = getattr(obj, "file_name", None) or f"{attr}_{msg.id}{ext}"
+            return obj, name.replace("/", "_")
+    return None, None
+
+
 # --- Async Helper Functions ---
 
 async def edit_message_async(msg, content, parse_mode, max_retries=3, reply_markup=None):
@@ -186,12 +227,16 @@ async def extract_file(
                 def report_start_preparation(self): pass
                 def report_postprocess(self):        pass
                 def report_warning(self, w):         pass
+                def report_update(self, decompressed_bytes): pass   # required by py7zr >= 1.0
 
                 def report_start(self, path, size):
                     pass  # size = compressed chunk size, not useful here
 
                 def report_end(self, path, wrote_bytes):
-                    done_bytes[0] += wrote_bytes
+                    try:
+                        done_bytes[0] += int(wrote_bytes)   # py7zr >= 1.0 passes a str
+                    except (TypeError, ValueError):
+                        pass
                     now = time.time()
                     if now - last_edit[0] >= 3:
                         last_edit[0] = now
@@ -481,7 +526,9 @@ async def help_handler(_, m):
     PARSE_MODE = enums.ParseMode.MARKDOWN
     help_message = (
         "**📚 Commands**\n"
-        "┠ `/leech` `/l` `<url>` — direct link via Aria2 (`-e` extract, `-n <name>` rename)\n"
+        "┠ `/leech` `/l` `<url>` — direct link via Aria2 (`-e` extract, `-z [pass]` zip, `-n <name>` rename)\n"
+        "┠ Reply to a **Telegram file** with `/l` to re-upload it (rename/extract/zip/caption rules apply)\n"
+        "┠ `/l -i 5` replying to the first file/link — leech it and the next 4 messages\n"
         "┠ `/unzipleech` `/uzl` `<url>` — leech + extract archive\n"
         "┠ `/qbleech` `/ql` `/qb` `<magnet|.torrent>` — torrent via **qBittorrent** (or reply to a `.torrent`)\n"
         "┠ `/qbunzipleech` `/quzl` — qBit leech + extract\n"
@@ -495,7 +542,7 @@ async def help_handler(_, m):
         "┠ `/stats` `/st` — system stats  •  `/ping`\n"
         "┠ `/authorize` `/a` `/unauthorize` `/ua` — allow / remove a user or chat (owner)\n"
         "┠ `/log` — bot log (owner)  •  `/restart` `/r` — reboot (owner)\n"
-        "┖ Reply to a message that contains a link with any leech command.\n\n"
+        "┖ `-z` (zip) works on /l /qb /aria /y. No password = `.zip`, with password = AES `.7z`. Reply to a link with any leech command.\n\n"
         "**⚡ Uploads:** each task sends its files one by one, tasks upload in parallel & share speed, auto-retry, files over the Telegram limit are split into `.001 .002 …`\n"
         "**📦 Extract:** `.zip` `.7z` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tar.xz` (no `.rar`)"
     )
@@ -512,27 +559,53 @@ async def ping_handler(_, m):
 
 # ----- Aria2: /l (direct link) -----
 
-async def leech_handler(app, m: Message):
-    if not is_authorized(m):
-        return await _deny(m)
+def _tg_tracker(app, src):
+    """Download a Telegram file (reply source) into the shared pipeline."""
+    async def tracker(entry, gid):
+        media, name = _tg_media(src)
+        size = getattr(media, "file_size", 0) or 0
+        entry["name"] = name
+        entry["progress"] = {"done": 0, "total": size, "speed": 0}
+        if size and not _enough_disk(size):
+            entry["fail_reason"] = f"Not enough disk space for {format_size(size)}"
+            return {"ok": False, "err": "no disk space", "name": name}
+        folder = os.path.join(GLOBAL_STATE["DOWNLOAD_DIR"], f"tg_{gid}")
+        os.makedirs(folder, exist_ok=True)
+        target = os.path.join(folder, name)
+        t0 = time.time()
 
-    args = list(m.command[1:])
-    extract_mode = "-e" in args or m.command[0].lower() in ("unzipleech", "uzl")
-    args = [a for a in args if a != "-e"]
-    args, rename_to = _extract_rename_flag(args)
-    url = args[0] if args else _link_from_reply(m)
+        def progress(cur, tot):
+            if entry.get("cancel"):
+                raise Exception("Download cancelled by user.")
+            el = time.time() - t0
+            entry["progress"] = {"done": cur, "total": tot or size, "speed": cur / el if el > 0 else 0}
 
-    if not url:
-        return await reply_message_async(
-            m,
-            "Usage:\n"
-            "`/l <direct_url>`             — Leech and upload\n"
-            "`/l <direct_url> -e`          — Leech, extract, then upload all files\n"
-            "`/l <direct_url> -n <name>`   — Leech and rename before upload\n"
-            "Or reply to a message containing a link with `/l`.",
-            parse_mode=enums.ParseMode.MARKDOWN
-        )
+        try:
+            path = await app.download_media(src, file_name=target, progress=progress)
+        except Exception as e:
+            await _rm_paths([folder])
+            if entry.get("cancel"):
+                return {"cancelled": True}
+            return {"ok": False, "err": str(e) or e.__class__.__name__, "name": name}
+        if entry.get("cancel"):
+            await _rm_paths([folder])
+            return {"cancelled": True}
+        if not path:
+            await _rm_paths([folder])
+            return {"ok": False, "err": "Telegram returned no file", "name": name}
+        return {"ok": True, "gid": gid, "name": name, "paths": [str(path)], "cleanup": [folder]}
 
+    return tracker
+
+
+async def _leech_one(app, m, url, src, extract_mode, rename_to, zip_opt, new_dash=True):
+    """Start ONE leech task from a link (Aria2) or a Telegram message with a file."""
+    if src is not None:
+        gid = f"tg{src.id}{int(time.time() * 1000) % 10**6:x}"
+        return await _run_task(
+            app, m, gid, _tg_tracker(app, src), extract_mode,
+            mode_tag="#Extract | #Telegram" if extract_mode else "#Leech | #Telegram",
+            rename_to=rename_to, engine="Telegram", zip_opt=zip_opt, new_dash=new_dash)
     try:
         options = {
             "dir": GLOBAL_STATE["DOWNLOAD_DIR"],
@@ -543,12 +616,91 @@ async def leech_handler(app, m: Message):
         dl = await asyncio.to_thread(ARIA2_API.add_uris, [url], options)
     except Exception as e:
         return await reply_message_async(m, f"Failed to start download: {e}", parse_mode=None)
-
     await _run_task(
         app, m, dl.gid, _aria_tracker(dl), extract_mode,
         mode_tag="#Extract | #Aria2" if extract_mode else "#Leech | #Aria2",
-        rename_to=rename_to, engine=f"Aria2 v{GLOBAL_STATE.get('ARIA_VER', '?')}"
-    )
+        rename_to=rename_to, engine=f"Aria2 v{GLOBAL_STATE.get('ARIA_VER', '?')}",
+        zip_opt=zip_opt, new_dash=new_dash)
+
+
+MULTI_MAX = 20
+
+
+async def leech_handler(app, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+
+    args = list(m.command[1:])
+    extract_mode = "-e" in args or m.command[0].lower() in ("unzipleech", "uzl")
+    args = [a for a in args if a != "-e"]
+    args, multi = _parse_multi(args)
+    args, zip_opt = _parse_zip(args)
+    args, rename_to = _extract_rename_flag(args)
+    r = m.reply_to_message
+
+    # ── multi: /l -i N replying to the first message → it and the next N-1 messages ──
+    if multi:
+        if not r:
+            return await reply_message_async(
+                m, "Reply to the FIRST file/link with `/l -i <count>` (e.g. `/l -i 5`).",
+                parse_mode=enums.ParseMode.MARKDOWN)
+        n = min(multi, MULTI_MAX)
+        try:
+            got = await app.get_messages(m.chat.id, list(range(r.id, r.id + n)))
+        except Exception as e:
+            return await reply_message_async(m, f"❌ Could not read the messages: {e}", parse_mode=None)
+        items = []
+        for x in got if isinstance(got, list) else [got]:
+            if not x or getattr(x, "empty", False) or x.id == m.id:
+                continue
+            media, _ = _tg_media(x)
+            if media:
+                items.append((None, x))
+                continue
+            mm = _URL_RE.search(x.text or x.caption or "")
+            if mm and not mm.group(1).startswith("magnet:"):
+                items.append((mm.group(1), None))
+        if not items:
+            return await reply_message_async(m, "⚠️ No files or links found in those messages.", parse_mode=None)
+        await reply_message_async(
+            m, f"📥 Starting <b>{len(items)}</b> task(s)" + (f" (limit {MULTI_MAX})" if multi > MULTI_MAX else ""),
+            parse_mode=enums.ParseMode.HTML)
+        rn = rename_to if len(items) == 1 else None      # -n only makes sense for one file
+
+        async def go(i, url, src):
+            await asyncio.sleep(i * 0.7)                 # stagger so Telegram / aria2 are not hammered
+            await _leech_one(app, m, url, src, extract_mode, rn, zip_opt, new_dash=(i == 0))
+
+        await asyncio.gather(*[go(i, u, sm) for i, (u, sm) in enumerate(items)])
+        return
+
+    # ── single: link in args > file in reply > link in reply ──
+    url = args[0] if args else None
+    src = None
+    if not url:
+        media, mname = _tg_media(r)
+        if media:
+            if mname.lower().endswith(".torrent"):
+                return await reply_message_async(m, "That is a .torrent — use `/qb` (or `/aria`) on it.",
+                                                 parse_mode=enums.ParseMode.MARKDOWN)
+            src = r
+        else:
+            url = _link_from_reply(m)
+
+    if not url and src is None:
+        return await reply_message_async(
+            m,
+            "Usage:\n"
+            "`/l <direct_url>`             — Leech and upload\n"
+            "`/l <direct_url> -e`          — Leech, extract, then upload all files\n"
+            "`/l <direct_url> -z [pass]`   — Leech, pack into zip (or password .7z), upload\n"
+            "`/l <direct_url> -n <name>`   — Leech and rename before upload\n"
+            "Reply to a message with a link OR a Telegram file with `/l`.\n"
+            "`/l -i 5` replying to the first file/link — leech that message and the next 4.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+
+    await _leech_one(app, m, url, src, extract_mode, rename_to, zip_opt)
 
 
 # ----- Aria2: /ql (magnet / .torrent) -----
@@ -592,6 +744,7 @@ async def ql_handler(app, m: Message):
     args = list(m.command[1:])
     extract_mode = "-e" in args
     args = [a for a in args if a != "-e"]
+    args, zip_opt = _parse_zip(args)
     args, rename_to = _extract_rename_flag(args)
     magnet_uri = args[0] if args else _link_from_reply(m)
 
@@ -644,7 +797,7 @@ async def ql_handler(app, m: Message):
         app, m, dl.gid, _aria_tracker(dl, extra_cleanup=[torrent_path] if torrent_path else []),
         extract_mode,
         mode_tag="#Extract | #Torrent" if extract_mode else "#Leech | #Magnet",
-        rename_to=rename_to, engine=f"Aria2 v{GLOBAL_STATE.get('ARIA_VER', '?')}"
+        rename_to=rename_to, engine=f"Aria2 v{GLOBAL_STATE.get('ARIA_VER', '?')}", zip_opt=zip_opt
     )
 
 
@@ -660,6 +813,7 @@ async def qb_handler(app, m: Message):
     args = list(m.command[1:])
     extract_mode = "-e" in args or m.command[0].lower() in ("qbunzipleech", "quzl")
     args = [a for a in args if a != "-e"]
+    args, zip_opt = _parse_zip(args)
     args, rename_to = _extract_rename_flag(args)
     source = args[0] if args else _link_from_reply(m)
 
@@ -707,7 +861,8 @@ async def qb_handler(app, m: Message):
     await _run_task(
         app, m, gid, _qbit_tracker(h), extract_mode,
         mode_tag="#Extract | #qBit" if extract_mode else "#Leech | #qBit",
-        rename_to=rename_to, engine=f"qBittorrent v{qb.version()}", extra_state={"engine_id": "qbit", "hash": h}
+        rename_to=rename_to, engine=f"qBittorrent v{qb.version()}", extra_state={"engine_id": "qbit", "hash": h},
+        zip_opt=zip_opt
     )
 
 
@@ -870,12 +1025,13 @@ def _qbit_tracker(h):
     return tracker
 
 
-async def _run_task(app, m, gid, tracker, extract_mode, mode_tag, rename_to, engine, extra_state=None):
+async def _run_task(app, m, gid, tracker, extract_mode, mode_tag, rename_to, engine, extra_state=None,
+                    zip_opt=None, new_dash=True):
     GLOBAL_STATE["DOWNLOAD_COUNTER"] += 1
     start_time = time.time()
     first, uid = _who(m)
 
-    await _ensure_dashboard(app, m.chat.id, force_new=True)
+    await _ensure_dashboard(app, m.chat.id, force_new=new_dash)
 
     entry = {
         "cancel": False, "kind": "⬇️ DL", "name": "Fetching info...", "status": "Download",
@@ -914,14 +1070,68 @@ async def _run_task(app, m, gid, tracker, extract_mode, mode_tag, rename_to, eng
 
     try:
         await _after_download(app, m, res["gid"], res["paths"], res["cleanup"], extract_mode,
-                              mode_tag, rename_to, res["name"], start_time)
+                              mode_tag, rename_to, res["name"], start_time, zip_opt)
     except Exception as e:
         print(f"❌ post-download crashed: {e!r}")
         await _rm_paths(res.get("cleanup", []) + res.get("paths", []))
         await reply_message_async(m, f"❌ Post-processing failed: {e}", parse_mode=None)
 
 
-async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, rename_to, dl_name, start_time):
+def _pack_archive(paths, out_path, password, entry):
+    """Blocking. password None-safe: '' -> plain .zip (stored, fast), 'x' -> AES-256 .7z.
+    Updates entry['progress']; raises nothing (returns (ok, error))."""
+    import zipfile
+    sizes = []
+    for p in paths:
+        try:
+            sizes.append(os.path.getsize(p))
+        except OSError:
+            sizes.append(0)
+    total = max(sum(sizes), 1)
+    try:
+        base = os.path.commonpath([os.path.dirname(p) for p in paths])
+    except ValueError:
+        base = os.path.dirname(paths[0])
+    names = [os.path.relpath(p, base).replace(os.sep, "/") for p in paths]
+    t0 = time.time()
+    done = 0
+
+    def tick(n):
+        nonlocal done
+        done += n
+        if entry.get("cancel"):
+            raise Exception("Archive cancelled by user.")
+        el = time.time() - t0
+        entry["progress"] = {"done": done, "total": total, "speed": done / el if el > 0 else 0}
+
+    try:
+        if password:
+            import py7zr
+            filters = [{"id": py7zr.FILTER_COPY}, {"id": py7zr.FILTER_CRYPTO_AES256_SHA256}]
+            with py7zr.SevenZipFile(out_path, "w", password=password, filters=filters) as arc:
+                for p, nm, sz in zip(paths, names, sizes):
+                    arc.write(p, nm)
+                    tick(sz)
+        else:
+            with zipfile.ZipFile(out_path, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
+                for p, nm in zip(paths, names):
+                    zi = zipfile.ZipInfo.from_file(p, nm)
+                    zi.compress_type = zipfile.ZIP_STORED
+                    with open(p, "rb") as src, zf.open(zi, "w", force_zip64=True) as dst:
+                        while True:
+                            chunk = src.read(8 * 1024 * 1024)
+                            if not chunk:
+                                break
+                            dst.write(chunk)
+                            tick(len(chunk))
+        return True, ""
+    except Exception as e:
+        _rm_path(out_path)
+        return False, str(e) or e.__class__.__name__
+
+
+async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, rename_to, dl_name, start_time,
+                          zip_opt=None):
     first, uid = _who(m)
     target_chat = (await us.get(uid))["dump"] or config.LEECH_DUMP or m.chat.id
     cleanup = list(cleanup)
@@ -945,7 +1155,7 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
     renamed = []
     for p in files:
         original = os.path.basename(p)
-        if rename_to and len(files) == 1:
+        if rename_to and len(files) == 1 and zip_opt is None:
             _, orig_ext = os.path.splitext(original)
             _, new_ext = os.path.splitext(rename_to)
             new_name = rename_to if new_ext else f"{rename_to}{orig_ext}"
@@ -1004,6 +1214,36 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
                     fresh.add(jobs[-1])
     else:
         jobs = files
+
+    # ── 3b. zip (-z [password]): pack everything into ONE archive ───────────
+    if zip_opt is not None and jobs:
+        stem = os.path.splitext(rename_to)[0] if rename_to else (
+            os.path.splitext(dl_name)[0] if dl_name and dl_name != "?" else os.path.splitext(os.path.basename(jobs[0]))[0])
+        stem = (stem or "archive").replace("/", "_")
+        zdir = os.path.join(GLOBAL_STATE["DOWNLOAD_DIR"], f"zip_{gid}")
+        os.makedirs(zdir, exist_ok=True)
+        cleanup.append(zdir)
+        out_path = os.path.join(zdir, stem + (".7z" if zip_opt else ".zip"))
+        z_key = f"{gid}_z"
+        GLOBAL_STATE["ACTIVE"][z_key] = {
+            "cancel": False, "chat_id": m.chat.id, "name": os.path.basename(out_path), "kind": "🗜️ ZIP",
+            "progress": {"done": 0, "total": 1, "speed": 0}, "start_time": time.time(),
+            "user_first": first, "user_id": uid, "mode_tag": mode_tag,
+            "status": "Archive", "engine": "py7zr (AES)" if zip_opt else "zipfile",
+        }
+        await _ensure_dashboard(app, m.chat.id)
+        ok, zerr = await asyncio.to_thread(_pack_archive, jobs, out_path, zip_opt, GLOBAL_STATE["ACTIVE"][z_key])
+        was_cancelled = GLOBAL_STATE["ACTIVE"].get(z_key, {}).get("cancel", False)
+        GLOBAL_STATE["ACTIVE"].pop(z_key, None)
+        if not ok:
+            await _rm_paths(cleanup + jobs)
+            if not was_cancelled:
+                await reply_message_async(m, f"❌ <b>Archive failed:</b> <code>{_html.escape(zerr)}</code>",
+                                          parse_mode=enums.ParseMode.HTML)
+            return
+        await _rm_paths(jobs)                          # sources no longer needed, frees disk
+        jobs = [out_path]
+        fresh = set() if rename_to else {out_path}
 
     if not jobs:
         await _rm_paths(cleanup)
@@ -1105,6 +1345,9 @@ async def _cancel_task(task_id, uid):
 
     if info.get("kind") == "🗜️ EX":
         return f"🛑 Cancelling extraction of <b>{_html.escape(info['name'])}</b>…"
+
+    if info.get("kind") == "🗜️ ZIP":
+        return f"🛑 Cancelling archive <b>{_html.escape(info['name'])}</b>…"
 
     # ── download: the engine tracker sees the flag and cleans up itself ──
     return f"🛑 Cancelling download <b>{_html.escape(str(info.get('name', task_id)))}</b>…"
@@ -1479,6 +1722,7 @@ async def ytdl_handler(app, m: Message):
         i = args.index("-q")
         quality = args[i + 1] if i + 1 < len(args) else None
         args = args[:i] + args[i + 2:]
+    args, zip_opt = _parse_zip(args)
     args, rename_to = _extract_rename_flag(args)
     url = args[0] if args else _link_from_reply(m)
 
@@ -1546,7 +1790,8 @@ async def ytdl_handler(app, m: Message):
     os.makedirs(outdir, exist_ok=True)
     await _run_task(
         app, m, gid, _ytdl_tracker(url, outdir, choice, is_playlist, no_playlist, title, cookiefile),
-        False, mode_tag="#Leech | #YtDlp", rename_to=rename_to, engine=f"yt-dlp v{ytdl.version()}"
+        False, mode_tag="#Leech | #YtDlp", rename_to=rename_to, engine=f"yt-dlp v{ytdl.version()}",
+        zip_opt=zip_opt
     )
 
 
