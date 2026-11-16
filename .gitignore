@@ -1,0 +1,17 @@
+config.env
+*.session
+*.session-journal
+bot.log
+qbit.log
+aria2.log
+aria2.session
+downloads/
+.qbit/
+.update_backup/
+thumbs/
+cookies/
+userdata.json
+__pycache__/
+.venv/
+bin/qbittorrent-nox
+bin/deno
