@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    aria2 ffmpeg curl unzip ca-certificates lsof net-tools psmisc procps \
+    aria2 ffmpeg git curl unzip ca-certificates lsof net-tools psmisc procps \
     build-essential python3-dev libffi-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 

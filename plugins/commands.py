@@ -2147,6 +2147,9 @@ async def restart_callback_handler(app, cq: CallbackQuery):
     except Exception:
         pass
     await asyncio.sleep(1)
+    # restart = pull the latest code first (update.py --run), then start the bot again
+    if os.path.isfile("update.py"):
+        os.execl(sys.executable, sys.executable, "update.py", "--run")
     os.execl(sys.executable, sys.executable, *sys.argv)
 
 

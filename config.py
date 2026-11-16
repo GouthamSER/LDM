@@ -96,9 +96,9 @@ AUTH_CHATS = _id_list("AUTH_CHATS")
 # Parallel Telegram uploads
 # Max files uploading at once across ALL tasks. 0 = no cap (Leechv2 style: each task uploads its
 # files one by one, tasks run in parallel and share the bandwidth).
-MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 44))
+MAX_UPLOADS = int(get_env_variable("MAX_UPLOADS", 0))
 # Parallel file-part streams per upload inside the Telegram client (1 = safest vs FLOOD_WAIT)
-MAX_TRANSMISSIONS = int(get_env_variable("MAX_TRANSMISSIONS", 4))
+MAX_TRANSMISSIONS = int(get_env_variable("MAX_TRANSMISSIONS", 1))
 # Files bigger than this are split into .001 .002 ... parts (bytes).
 # Default 1.95GiB (safe for the 2GB bot limit). Premium uploader: 3.9GiB. 0 = never split.
 SPLIT_SIZE = int(get_env_variable("SPLIT_SIZE", int(1.95 * 1024**3)))
@@ -127,8 +127,7 @@ DATABASE_NAME = get_env_variable("DATABASE_NAME", "ldmbot")
 # =================
 LEECH_PREFIX    = get_env_variable("LEECH_PREFIX", "")
 LEECH_SUFFIX    = get_env_variable("LEECH_SUFFIX", "")
-LEECH_NAME_SWAP = get_env_variable("LEECH_NAME_SWAP", r"[\[\(\{] *www\.[^\]\)\}]+[\]\)\}]:|www\.[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,10}:|^[ \-_~]+:")
-#leech name swap this removes domain name eg: www.domain.ext movie.mkv -> movie.mkv
+LEECH_NAME_SWAP = get_env_variable("LEECH_NAME_SWAP", "")
 
 # =================
 # yt-dlp
@@ -137,6 +136,14 @@ LEECH_NAME_SWAP = get_env_variable("LEECH_NAME_SWAP", r"[\[\(\{] *www\.[^\]\)\}]
 YTDL_COOKIES = get_env_variable("YTDL_COOKIES", "cookies.txt")
 # Extra yt-dlp options as a python-dict literal, e.g. {"proxy": "http://..."}
 YTDL_OPTIONS = get_env_variable("YTDL_OPTIONS", "")
+
+# =================
+# Auto update on every start / restart (update.py). Empty UPSTREAM_REPO = no update.
+# Private repo: https://<token>@github.com/user/repo
+# =================
+UPSTREAM_REPO = get_env_variable("UPSTREAM_REPO", "")
+UPSTREAM_BRANCH = get_env_variable("UPSTREAM_BRANCH", "main")
+UPDATE_KEEP_FILES = get_env_variable("UPDATE_KEEP_FILES", "")   # e.g. "config.py,cookies.txt"
 
 # =================
 # Telegram command menu (the "/" list) — set automatically on every start

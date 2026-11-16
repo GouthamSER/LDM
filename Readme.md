@@ -129,8 +129,22 @@ Files: `Procfile`, `runtime.txt`, `Aptfile` (aria2, ffmpeg, psmisc; needs the ap
 | `LEECH_DUMP` | `0` | Upload into this chat instead of the command chat |
 | `LEECH_PREFIX` `LEECH_SUFFIX` `LEECH_NAME_SWAP` | — | Default name rules |
 | `YTDL_COOKIES` `YTDL_OPTIONS` | `cookies.txt` | yt-dlp default cookies file / extra options (dict literal) |
+| `UPSTREAM_REPO` `UPSTREAM_BRANCH` `UPDATE_KEEP_FILES` | — `main` — | Auto update, see below |
 | `SET_COMMANDS` | `True` | Push the "/" menu on start |
 | `ENGINE_NAME` | auto | Override the engine label in messages |
+
+## 🔄 Auto update (like Leechv2)
+
+On every start and every `/restart`, `update.py` pulls the newest code from your repo, then starts the bot. Set:
+
+| Variable | Description |
+|---|---|
+| `UPSTREAM_REPO` | Git URL. Private repo: `https://<token>@github.com/user/repo`. Empty = no update |
+| `UPSTREAM_BRANCH` | Branch, default `main` |
+| `UPDATE_KEEP_FILES` | Local files the update must not overwrite, e.g. `config.py,cookies.txt` (default none; `config.py` is always backed up to `.update_backup/`) |
+| `UPDATE_PIP` | `true` always / `false` never reinstall requirements (default: only when `requirements.txt` changed) |
+
+It runs `git fetch` + `git reset --hard`, so local edits to tracked files are replaced. Tokens are hidden in logs. If the update fails the bot still starts with the current code. Needs `git` (already in the Docker image, `setup.sh` and `termux.sh`).
 
 ## 🩺 Troubleshooting
 

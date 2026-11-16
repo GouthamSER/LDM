@@ -69,4 +69,5 @@ if [ "$A" != 1 ]; then
 fi
 [ "$HAVE_QBIT" = 0 ] || { [ "$Q" = 1 ] && echo "✅ qBittorrent READY!" || { echo "⚠️ qBittorrent not up — /qb disabled. Log:"; tail -10 qbit.log; }; }
 echo "✅ Aria2 READY!"
+[ -f update.py ] && "$PY" update.py
 exec "$PY" bot.py

@@ -9,7 +9,7 @@ export PATH="$BIN:$PATH"
 echo "📦 apt packages..."
 if command -v apt-get >/dev/null; then
   $SUDO apt-get update -y
-  $SUDO apt-get install -y --no-install-recommends aria2 ffmpeg curl unzip ca-certificates psmisc procps \
+  $SUDO apt-get install -y --no-install-recommends aria2 ffmpeg git curl unzip ca-certificates psmisc procps \
       python3 python3-pip python3-venv build-essential python3-dev libffi-dev libssl-dev
 else
   echo "⚠️ no apt-get: install aria2, ffmpeg, curl, unzip, python3-pip yourself"
