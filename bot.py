@@ -111,7 +111,7 @@ threading.Thread(target=time_tracker, daemon=True).start()
 # ================= BOT CLIENT =================
 _client_kwargs = dict(api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
 try:
-    app = Client("aria2-leech-bot", max_concurrent_transmissions=config.MAX_TRANSMISSIONS, **_client_kwargs)
+    app = Client("aria2-leech-bot", max_concurrent_transmissions=max(1, config.MAX_TRANSMISSIONS), **_client_kwargs)
 except TypeError:   # fork without that parameter
     app = Client("aria2-leech-bot", **_client_kwargs)
 
