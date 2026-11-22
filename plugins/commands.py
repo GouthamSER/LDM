@@ -1036,7 +1036,7 @@ def _aria_tracker(dl, extra_cleanup=()):
             entry["name"] = dl.name
             entry["progress"] = {"done": dl.completed_length, "total": dl.total_length, "speed": dl.download_speed}
             if dl.bittorrent and dl.connections is not None:
-                entry["extra"] = f"<b>Seeders :</b> {dl.num_seeders} · <b>Conn :</b> {dl.connections}"
+                entry["extra"] = f"🌱 <b>Seeders :</b> {dl.num_seeders} · 🔗 <b>Conn :</b> {dl.connections}"
             if not disk_checked and dl.total_length > 0:
                 disk_checked = True
                 if not _enough_disk(dl.total_length - dl.completed_length):
@@ -1086,7 +1086,7 @@ def _qbit_tracker(h):
             entry["name"] = t.name
             entry["status"] = qb.state_text(t.state)
             entry["progress"] = {"done": int(t.size * t.progress), "total": t.size, "speed": t.dlspeed}
-            entry["extra"] = f"<b>Seeders :</b> {t.num_seeds} · <b>Leechers :</b> {t.num_leechs}"
+            entry["extra"] = f"🌱 <b>Seeders :</b> {t.num_seeds} · 🧲 <b>Leechers :</b> {t.num_leechs}"
 
             if qb.is_error(t):
                 try:
@@ -1593,7 +1593,7 @@ async def render_dashboard(app, chat_id, page):
 
     if not tasks:
         msg = (
-            "<i>No Active Downloads!</i>\n\n"
+            "💤 <i>No Active Downloads!</i>\n\n"
             "<blockquote><b><i>Bot Stats</i></b></blockquote>\n"
             f" • <b>CPU:</b> {snap['cpu']:.1f}% | <b>F:</b> {format_size(snap['free'])} "
             f"[{snap['free'] * 100 / max(snap['total'], 1):.0f}%]\n"
@@ -1610,20 +1610,22 @@ async def render_dashboard(app, chat_id, page):
                 eta_str = "~"
             icon = {"⬇️ DL": "📥", "⬆️ UL": "📤"}.get(t["kind"], "🗜")
             eng = _html.escape(str(t["engine"]))
-            if t["extra"]:
-                eng += f" · {t['extra']}"
             rows = [
-                f"┌ {leech_bar(pct)} {pct:.2f}%",
-                f"├ <b>Processed :</b> {format_size(t['done'])} of {format_size(t['total'])} · <i>{_html.escape(t['status'])}</i>",
-                f"├ <b>Speed :</b> {format_speed(t['speed'])} | <b>ETA :</b> {eta_str}",
-                f"├ <b>Engine :</b> {eng}",
-                f"└ <b>Stop :</b> /c_{t['gid']} · {_mention(t['user_first'], t['user_id'])}",
+                f"┌ {leech_bar(pct)}  🔥 {pct:.2f}%",
+                f"├ 📦 <b>Processed :</b> {format_size(t['done'])} of {format_size(t['total'])} · <i>{_html.escape(t['status'])}</i>",
+                f"├ ⚡ <b>Speed :</b> {format_speed(t['speed'])}  ·  ⏳ <b>ETA :</b> {eta_str}",
+                f"├ ⚙️ <b>Engine :</b> {eng}",
+            ]
+            if t["extra"]:
+                rows.append(f"├ {t['extra']}")
+            rows += [
+                f"└ 🛑 <b>Stop :</b> /c_{t['gid']} · 👤 {_mention(t['user_first'], t['user_id'])}",
             ]
             blocks.append((idx, icon, str(t["name"]), "\n".join(rows)))
 
         # full file names; if the page would pass Telegram's 4096 limit, cut names down
         for cut in (None, 80, 50, 30):
-            msg = "".join(f"{i}. {ic} {_html.escape(nm if cut is None else nm[:cut])}\n{body}\n\n"
+            msg = "".join(f"{i}. {ic} {_html.escape(nm if cut is None else nm[:cut])}\n\n{body}\n\n"
                           for i, ic, nm, body in blocks)
             if len(msg) <= 3500:
                 break
@@ -1670,12 +1672,12 @@ async def _ensure_dashboard(app, chat_id, force_new=False):
     async with lock:                      # /l -i N starts many tasks at once: only one dashboard
         existing = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
 
-        if existing and existing.get("running"):
-            if not force_new:
-                return
+        if existing and existing.get("running") and not force_new:
+            return
+        if existing:                          # /status or new task: delete the old dashboard, no stale copies
             existing["running"] = False
             try:
-                await existing["msg"].edit_reply_markup(reply_markup=None)
+                await existing["msg"].delete()
             except Exception:
                 pass
 
