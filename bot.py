@@ -110,10 +110,16 @@ threading.Thread(target=time_tracker, daemon=True).start()
 
 # ================= BOT CLIENT =================
 _client_kwargs = dict(api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workers=16)
-try:
-    app = Client("aria2-leech-bot", max_concurrent_transmissions=max(1, config.MAX_TRANSMISSIONS), **_client_kwargs)
-except TypeError:   # fork without that parameter
-    app = Client("aria2-leech-bot", **_client_kwargs)
+# sleep_threshold: pyrogram auto-waits FloodWait up to this many seconds (default 10)
+app = None
+for _extra in (dict(max_concurrent_transmissions=max(1, config.MAX_TRANSMISSIONS), sleep_threshold=60),
+               dict(max_concurrent_transmissions=max(1, config.MAX_TRANSMISSIONS)),
+               dict(sleep_threshold=60), {}):
+    try:
+        app = Client("aria2-leech-bot", **_client_kwargs, **_extra)
+        break
+    except TypeError:   # fork without that parameter
+        continue
 
 # Register handlers from the external module
 register_handlers(app, aria2, GLOBAL_STATE)

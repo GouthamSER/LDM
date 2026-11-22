@@ -31,6 +31,7 @@ Telegram leech bot (wzgram / Pyrogram) that downloads with **Aria2**, **qBittorr
 | `/setcookies` `/delcookies` | yt-dlp cookies |
 | `/l` (reply to a Telegram file) | re-upload a Telegram file with rename / extract / zip / caption rules |
 | `/l -i 5` (reply to the first file/link) | multi: leech that message and the next 4 (max 20, one task each) |
+| `/ql -i 5` (reply to the first magnet / `.torrent`) | multi qBit: leech that message and the next 4 (max 20, one task each) |
 | `/stats` `/st` · `/ping` · `/help` `/h` | info |
 | `/authorize` `/a` · `/unauthorize` `/ua` | owner: allow / remove a user or chat |
 | `/log` · `/restart` `/r` `/restartall` | owner: log file, reboot |

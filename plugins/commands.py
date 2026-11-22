@@ -529,6 +529,7 @@ async def help_handler(_, m):
         "┠ `/leech` `/l` `<url>` — direct link via Aria2 (`-e` extract, `-z [pass]` zip, `-n <name>` rename)\n"
         "┠ Reply to a **Telegram file** with `/l` to re-upload it (rename/extract/zip/caption rules apply)\n"
         "┠ `/l -i 5` replying to the first file/link — leech it and the next 4 messages\n"
+        "┠ `/ql -i 5` replying to the first magnet/.torrent — qBit leech it and the next 4\n"
         "┠ `/unzipleech` `/uzl` `<url>` — leech + extract archive\n"
         "┠ `/qbleech` `/ql` `/qb` `<magnet|.torrent>` — torrent via **qBittorrent** (or reply to a `.torrent`)\n"
         "┠ `/qbunzipleech` `/quzl` — qBit leech + extract\n"
@@ -595,21 +596,37 @@ def _tg_tracker(app, src):
                 el = time.time() - t0
                 entry["progress"] = {"done": cur, "total": tot or size, "speed": cur / el if el > 0 else 0}
 
-            dl_task = asyncio.create_task(app.download_media(src, file_name=target, progress=progress))
-            while not dl_task.done():
-                await asyncio.wait({dl_task}, timeout=1)
-                if entry.get("cancel") and not dl_task.done():
-                    dl_task.cancel()
+            path = None
+            for _try in range(4):           # FloodWait (upload.GetFile) -> wait it out, retry
+                dl_task = asyncio.create_task(app.download_media(src, file_name=target, progress=progress))
+                while not dl_task.done():
+                    await asyncio.wait({dl_task}, timeout=1)
+                    if entry.get("cancel") and not dl_task.done():
+                        dl_task.cancel()
+                        break
+                try:
+                    path = await dl_task
                     break
-            try:
-                path = await dl_task
-            except asyncio.CancelledError:
-                path = None
-                if not entry.get("cancel"):
-                    raise                   # the whole task was cancelled from outside
-            except Exception as e:
-                await _rm_paths([folder])
-                return {"ok": False, "err": str(e) or e.__class__.__name__, "name": name}
+                except asyncio.CancelledError:
+                    path = None
+                    if not entry.get("cancel"):
+                        raise               # the whole task was cancelled from outside
+                    break
+                except FloodWait as e:
+                    if _try == 3:
+                        await _rm_paths([folder])
+                        return {"ok": False, "err": f"FloodWait {e.value}s (Telegram)", "name": name}
+                    entry["status"] = f"FloodWait {e.value}s"
+                    for _ in range(int(e.value) + 1):
+                        if entry.get("cancel"):
+                            break
+                        await asyncio.sleep(1)
+                    if entry.get("cancel"):
+                        break
+                    entry["status"] = "Download"
+                except Exception as e:
+                    await _rm_paths([folder])
+                    return {"ok": False, "err": str(e) or e.__class__.__name__, "name": name}
         finally:
             TG_DL_SEM.release()
         if entry.get("cancel"):
@@ -828,45 +845,8 @@ async def ql_handler(app, m: Message):
 
 # ----- qBittorrent: /qb -----
 
-async def qb_handler(app, m: Message):
-    if not is_authorized(m):
-        return await _deny(m)
-    if not qb.QBIT_AVAILABLE:
-        return await reply_message_async(m, "❌ `aioqbt` is not installed (`pip install aioqbt`).",
-                                         parse_mode=enums.ParseMode.MARKDOWN)
-
-    args = list(m.command[1:])
-    extract_mode = "-e" in args or m.command[0].lower() in ("qbunzipleech", "quzl")
-    args = [a for a in args if a != "-e"]
-    args, zip_opt = _parse_zip(args)
-    args, rename_to = _extract_rename_flag(args)
-    source = args[0] if args else _link_from_reply(m)
-
-    torrent_bytes = None
-    try:
-        tpath = await _download_torrent_doc(app, m.reply_to_message)
-        if tpath:
-            torrent_bytes = await asyncio.to_thread(Path(tpath).read_bytes)
-            await asyncio.to_thread(_rm_path, tpath)
-    except Exception as e:
-        return await reply_message_async(m, f"❌ Failed to fetch .torrent file: {e}", parse_mode=None)
-
-    if torrent_bytes is None and not source:
-        return await reply_message_async(
-            m,
-            "Usage (qBittorrent engine):\n"
-            "`/qb <magnet>`             — Leech a magnet\n"
-            "`/qb <.torrent URL>`       — Leech from a torrent link\n"
-            "`/qb <magnet> -e`          — Leech, extract, then upload\n"
-            "`/qb <magnet> -n <name>`   — Leech and rename (single-file torrents)\n"
-            "Reply to a `.torrent` file (or a message with a link) with `/qb`.",
-            parse_mode=enums.ParseMode.MARKDOWN
-        )
-
-    if torrent_bytes is None and not (source.startswith("magnet:") or source.startswith(("http://", "https://"))):
-        return await reply_message_async(m, "❌ Give a `magnet:` link, a `.torrent` URL, or reply to a `.torrent` file.",
-                                         parse_mode=enums.ParseMode.MARKDOWN)
-
+async def _qb_one(app, m, source, torrent_bytes, extract_mode, rename_to, zip_opt, new_dash=True):
+    """Start ONE qBittorrent task from a magnet / .torrent URL (source) or raw .torrent bytes."""
     if torrent_bytes is not None and qb.torrent_hash(torrent_bytes) is None:
         return await reply_message_async(m, "❌ That file is not a valid .torrent.", parse_mode=None)
 
@@ -887,8 +867,112 @@ async def qb_handler(app, m: Message):
         app, m, gid, _qbit_tracker(h), extract_mode,
         mode_tag="#Extract | #qBit" if extract_mode else "#Leech | #qBit",
         rename_to=rename_to, engine=f"qBittorrent v{qb.version()}", extra_state={"engine_id": "qbit", "hash": h},
-        zip_opt=zip_opt
+        zip_opt=zip_opt, new_dash=new_dash
     )
+
+
+async def _torrent_bytes_from(app, msg):
+    """Bytes of a .torrent document in `msg`, else None. Temp file is removed."""
+    tpath = await _download_torrent_doc(app, msg)
+    if not tpath:
+        return None
+    try:
+        return await asyncio.to_thread(Path(tpath).read_bytes)
+    finally:
+        await asyncio.to_thread(_rm_path, tpath)
+
+
+async def qb_handler(app, m: Message):
+    if not is_authorized(m):
+        return await _deny(m)
+    if not qb.QBIT_AVAILABLE:
+        return await reply_message_async(m, "❌ `aioqbt` is not installed (`pip install aioqbt`).",
+                                         parse_mode=enums.ParseMode.MARKDOWN)
+
+    args = list(m.command[1:])
+    extract_mode = "-e" in args or m.command[0].lower() in ("qbunzipleech", "quzl")
+    args = [a for a in args if a != "-e"]
+    args, multi = _parse_multi(args)
+    args, zip_opt = _parse_zip(args)
+    args, rename_to = _extract_rename_flag(args)
+    r = m.reply_to_message
+
+    # ── multi: /ql -i N replying to the first magnet/.torrent → it and the next N-1 messages ──
+    if multi:
+        if not r:
+            return await reply_message_async(
+                m, "Reply to the FIRST magnet / .torrent with `/ql -i <count>` (e.g. `/ql -i 5`).",
+                parse_mode=enums.ParseMode.MARKDOWN)
+        n = min(multi, MULTI_MAX)
+        try:
+            got = await app.get_messages(m.chat.id, list(range(r.id, r.id + n)))
+        except Exception as e:
+            return await reply_message_async(m, f"❌ Could not read the messages: {e}", parse_mode=None)
+        items = []   # (source_link, torrent_msg)
+        for x in got if isinstance(got, list) else [got]:
+            if not x or getattr(x, "empty", False) or x.id == m.id:
+                continue
+            d = getattr(x, "document", None)
+            if d and ((d.file_name or "").lower().endswith(".torrent") or d.mime_type == "application/x-bittorrent"):
+                items.append((None, x))
+                continue
+            mm = _URL_RE.search(x.text or x.caption or "")
+            if mm:
+                items.append((mm.group(1), None))
+        if not items:
+            return await reply_message_async(m, "⚠️ No magnets or .torrent files found in those messages.",
+                                             parse_mode=None)
+        await reply_message_async(
+            m, f"📥 Starting <b>{len(items)}</b> torrent(s)" + (f" (limit {MULTI_MAX})" if multi > MULTI_MAX else ""),
+            parse_mode=enums.ParseMode.HTML)
+        rn = rename_to if len(items) == 1 else None      # -n only makes sense for one torrent
+
+        async def go(i, link, tmsg):
+            await asyncio.sleep(i * 1.0)                 # stagger so qBit / Telegram are not hammered
+            data = None
+            if tmsg is not None:
+                try:
+                    data = await _torrent_bytes_from(app, tmsg)
+                except Exception as e:
+                    return await reply_message_async(m, f"❌ Failed to fetch .torrent file: {e}", parse_mode=None)
+                if data is None:
+                    return
+            try:
+                await _qb_one(app, m, link, data, extract_mode, rn, zip_opt, new_dash=(i == 0))
+            except Exception as e:
+                print(f"❌ /ql multi item {i} crashed: {e!r}")
+                await reply_message_async(m, f"❌ Task {i + 1} failed: {e}", parse_mode=None)
+
+        await asyncio.gather(*[go(i, lk, tm) for i, (lk, tm) in enumerate(items)])
+        return
+
+    # ── single: link in args > .torrent in reply > link in reply ──
+    source = args[0] if args else _link_from_reply(m)
+
+    torrent_bytes = None
+    try:
+        torrent_bytes = await _torrent_bytes_from(app, r)
+    except Exception as e:
+        return await reply_message_async(m, f"❌ Failed to fetch .torrent file: {e}", parse_mode=None)
+
+    if torrent_bytes is None and not source:
+        return await reply_message_async(
+            m,
+            "Usage (qBittorrent engine):\n"
+            "`/qb <magnet>`             — Leech a magnet\n"
+            "`/qb <.torrent URL>`       — Leech from a torrent link\n"
+            "`/qb <magnet> -e`          — Leech, extract, then upload\n"
+            "`/qb <magnet> -n <name>`   — Leech and rename (single-file torrents)\n"
+            "Reply to a `.torrent` file (or a message with a link) with `/qb`.\n"
+            "`/ql -i 5` replying to the first magnet/.torrent — leech it and the next 4.",
+            parse_mode=enums.ParseMode.MARKDOWN
+        )
+
+    if torrent_bytes is None and not (source.startswith("magnet:") or source.startswith(("http://", "https://"))):
+        return await reply_message_async(m, "❌ Give a `magnet:` link, a `.torrent` URL, or reply to a `.torrent` file.",
+                                         parse_mode=enums.ParseMode.MARKDOWN)
+
+    await _qb_one(app, m, source, torrent_bytes, extract_mode, rename_to, zip_opt)
 
 
 # ================= TASK PIPELINE =================
@@ -1424,7 +1508,7 @@ async def status_callback_handler(app, cq: CallbackQuery):
 # itself once nothing is active (no endless edits / `top` spawns while idle).
 
 DASH_PAGE_SIZE        = 4   # Leechv2 STATUS_LIMIT (4 keeps the message under Telegram's 4096 chars)
-DASH_REFRESH_INTERVAL = 5   # seconds
+DASH_REFRESH_INTERVAL = 8   # seconds (lower = Telegram edit FloodWait in groups)
 DASH_IDLE_STOP        = 3   # empty refreshes in a row before the loop parks itself
 
 
@@ -1564,6 +1648,9 @@ async def render_dashboard(app, chat_id, page):
     return msg, keyboard, page
 
 
+_DASH_LOCKS = {}
+
+
 async def _ensure_dashboard(app, chat_id, force_new=False):
     """
     Auto-opens the dashboard for this chat.
@@ -1571,22 +1658,35 @@ async def _ensure_dashboard(app, chat_id, force_new=False):
     - force_new=True (new /l, /ql, /qb or /status): freeze the old message in place
       (buttons stripped, never deleted) and pop a fresh one.
     """
-    existing = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
+    lock = _DASH_LOCKS.setdefault(chat_id, asyncio.Lock())
+    async with lock:                      # /l -i N starts many tasks at once: only one dashboard
+        existing = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
 
-    if existing and existing.get("running"):
-        if not force_new:
+        if existing and existing.get("running"):
+            if not force_new:
+                return
+            existing["running"] = False
+            try:
+                await existing["msg"].edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
+        text, keyboard, page = await render_dashboard(app, chat_id, 1)
+        msg = None
+        for _ in range(3):
+            try:
+                msg = await app.send_message(chat_id, text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
+                break
+            except FloodWait as e:
+                await asyncio.sleep(e.value + 1)
+            except Exception as e:
+                print(f"⚠️ dashboard send failed: {e!r}")
+                return
+        if msg is None:
             return
-        existing["running"] = False
-        try:
-            await existing["msg"].edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-
-    text, keyboard, page = await render_dashboard(app, chat_id, 1)
-    msg = await app.send_message(chat_id, text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
-    gen = time.time()
-    GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 1, "running": True, "gen": gen}
-    asyncio.create_task(_dashboard_loop(app, chat_id, gen))
+        gen = time.time()
+        GLOBAL_STATE["DASHBOARDS"][chat_id] = {"msg": msg, "page": 1, "running": True, "gen": gen, "last": text}
+        asyncio.create_task(_dashboard_loop(app, chat_id, gen))
 
 
 async def _dashboard_loop(app, chat_id, gen):
@@ -1596,14 +1696,19 @@ async def _dashboard_loop(app, chat_id, gen):
         entry = GLOBAL_STATE["DASHBOARDS"].get(chat_id)
         if not entry or not entry.get("running") or entry.get("gen") != gen:
             return
-        text, keyboard, page = await render_dashboard(app, chat_id, entry["page"])
-        entry["page"] = page
-        idle = idle + 1 if not _dashboard_tasks(chat_id) else 0
-        if idle >= DASH_IDLE_STOP:
-            entry["running"] = False
-            await edit_message_async(entry["msg"], text, parse_mode=enums.ParseMode.HTML, reply_markup=None)
-            return
-        await edit_message_async(entry["msg"], text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
+        try:
+            text, keyboard, page = await render_dashboard(app, chat_id, entry["page"])
+            entry["page"] = page
+            idle = idle + 1 if not _dashboard_tasks(chat_id) else 0
+            if idle >= DASH_IDLE_STOP:
+                entry["running"] = False
+                await edit_message_async(entry["msg"], text, parse_mode=enums.ParseMode.HTML, reply_markup=None)
+                return
+            if text != entry.get("last"):          # identical text = needless edit = flood risk
+                entry["last"] = text
+                await edit_message_async(entry["msg"], text, parse_mode=enums.ParseMode.HTML, reply_markup=keyboard)
+        except Exception as e:                     # one bad render must not kill the dashboard
+            print(f"⚠️ dashboard refresh error: {e!r}")
         await asyncio.sleep(DASH_REFRESH_INTERVAL)
 
 
