@@ -647,7 +647,7 @@ async def _leech_one(app, m, url, src, extract_mode, rename_to, zip_opt, new_das
         return await _run_task(
             app, m, gid, _tg_tracker(app, src), extract_mode,
             mode_tag="#Extract | #Telegram" if extract_mode else "#Leech | #Telegram",
-            rename_to=rename_to, engine="Telegram", zip_opt=zip_opt, new_dash=new_dash)
+            rename_to=rename_to, engine=f"Telegram · Pyrogram v{_pyro_ver()}", zip_opt=zip_opt, new_dash=new_dash)
     try:
         options = {
             "dir": GLOBAL_STATE["DOWNLOAD_DIR"],
@@ -1036,7 +1036,7 @@ def _aria_tracker(dl, extra_cleanup=()):
             entry["name"] = dl.name
             entry["progress"] = {"done": dl.completed_length, "total": dl.total_length, "speed": dl.download_speed}
             if dl.bittorrent and dl.connections is not None:
-                entry["extra"] = f"<b>Seeders :</b> {dl.num_seeders} | <b>Conn :</b> {dl.connections}"
+                entry["extra"] = f"<b>Seeders :</b> {dl.num_seeders} · <b>Conn :</b> {dl.connections}"
             if not disk_checked and dl.total_length > 0:
                 disk_checked = True
                 if not _enough_disk(dl.total_length - dl.completed_length):
@@ -1086,7 +1086,7 @@ def _qbit_tracker(h):
             entry["name"] = t.name
             entry["status"] = qb.state_text(t.state)
             entry["progress"] = {"done": int(t.size * t.progress), "total": t.size, "speed": t.dlspeed}
-            entry["extra"] = f"<b>Seeders :</b> {t.num_seeds} | <b>Leechers :</b> {t.num_leechs}"
+            entry["extra"] = f"<b>Seeders :</b> {t.num_seeds} · <b>Leechers :</b> {t.num_leechs}"
 
             if qb.is_error(t):
                 try:
@@ -1387,7 +1387,7 @@ async def _after_download(app, m, gid, paths, cleanup, extract_mode, mode_tag, r
             "base_gid": gid, "cleanup": cleanup,
             "chat_id": m.chat.id, "start_time": time.time(),
             "user_first": first, "user_id": uid, "mode_tag": mode_tag,
-            "status": "Upload", "engine": GLOBAL_STATE.get("ENGINE_NAME", "Pyrogram"),
+            "status": "Upload", "engine": f"{GLOBAL_STATE.get('ENGINE_NAME', 'Pyrogram')} v{_pyro_ver()}",
         }
         upload_jobs.append((p, name, size, sub))
 
@@ -1512,11 +1512,19 @@ DASH_REFRESH_INTERVAL = 8   # seconds (lower = Telegram edit FloodWait in groups
 DASH_IDLE_STOP        = 3   # empty refreshes in a row before the loop parks itself
 
 
+def _pyro_ver():
+    try:
+        import pyrogram
+        return pyrogram.__version__
+    except Exception:
+        return "?"
+
+
 def leech_bar(pct):
-    """Leechv2 bar: [⬢⬢⬢⬡⬡...] 12 cells, one cell per 8%."""
+    """Dashboard bar: ▰▰▰▱▱... 12 cells."""
     p = min(max(float(pct or 0), 0), 100)
-    full = int(p // 8)
-    return "[" + "⬢" * full + "⬡" * (12 - full) + "]"
+    full = int(p / 100 * 12)
+    return "▰" * full + "▱" * (12 - full)
 
 
 def _dashboard_tasks(chat_id):
@@ -1592,46 +1600,46 @@ async def render_dashboard(app, chat_id, page):
             f" • <b>RAM:</b> {snap['ram']:.1f}% | <b>UPTIME:</b> {uptime}"
         )
     else:
-        msg = ""
+        blocks = []
         for idx, t in enumerate(tasks[start:start + DASH_PAGE_SIZE], start=start + 1):
             pct = (t["done"] / t["total"] * 100) if t["total"] else 0
-            elapsed = time.time() - t["start_time"]
             if t["speed"] > 0 and t["total"] > t["done"]:
                 eta = (t["total"] - t["done"]) / t["speed"]
-                eta_str, total_str = time_fmt(eta), time_fmt(elapsed + eta)
+                eta_str = time_fmt(eta)
             else:
-                eta_str = total_str = "~"
-            rows = [
-                f"├ {leech_bar(pct)}",
-                f"├ <b>Process :</b> {pct:.2f}%",
-                f"├ <b>Processed :</b> {format_size(t['done'])} of {format_size(t['total'])}",
-                f"├ <b>Status :</b> <i>{_html.escape(t['status'])}...</i>⬘",
-                f"├ <b>Speed :</b> {format_speed(t['speed'])}",
-                f"├ <b>Time :</b> {time_fmt(elapsed)} of {total_str} ( {eta_str} )",
-                f"├ <b>Engine :</b> {_html.escape(str(t['engine']))}",
-                f"├ <b>In Mode :</b> {_html.escape(t['in_mode'])}",
-                f"├ <b>Out Mode :</b> {_html.escape(t['out_mode'])}",
-            ]
+                eta_str = "~"
+            icon = {"⬇️ DL": "📥", "⬆️ UL": "📤"}.get(t["kind"], "🗜")
+            eng = _html.escape(str(t["engine"]))
             if t["extra"]:
-                rows.append(f"├ {t['extra']}")
-            rows += [
-                f"├ <b>User :</b> {_mention(t['user_first'], t['user_id'])}",
-                f"├ <b>ID :</b> {t['user_id']}",
-                f"└ <b>Stop :</b> /c_{t['gid']}",
+                eng += f" · {t['extra']}"
+            rows = [
+                f"┌ {leech_bar(pct)} {pct:.2f}%",
+                f"├ <b>Processed :</b> {format_size(t['done'])} of {format_size(t['total'])} · <i>{_html.escape(t['status'])}</i>",
+                f"├ <b>Speed :</b> {format_speed(t['speed'])} | <b>ETA :</b> {eta_str}",
+                f"├ <b>Engine :</b> {eng}",
+                f"└ <b>Stop :</b> /c_{t['gid']} · {_mention(t['user_first'], t['user_id'])}",
             ]
-            rows[0] = "┌" + rows[0][1:]
-            msg += f"{idx}. {_html.escape(str(t['name'])[:80])}\n" + "\n".join(rows) + "\n\n"
+            blocks.append((idx, icon, str(t["name"]), "\n".join(rows)))
 
-        msg += "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        if n > DASH_PAGE_SIZE:
-            msg += f"<b>TASKS:</b> {n}\n"
-        msg += (
-            f"<b>CPU:</b> {snap['cpu']:.1f}% | <b>RAM:</b> {snap['ram']:.1f}% | "
-            f"<b>FREE:</b> {format_size(snap['free'])}\n"
-            f"<b>IN:</b> {format_size(snap['net_in'])} | <b>OUT:</b> {format_size(snap['net_out'])}\n"
-            f"<b>DL:</b> {format_size(dl_speed)}/s | <b>UL:</b> {format_size(ul_speed)}/s | "
-            f"<b>UP:</b> {uptime}"
-        )
+        # full file names; if the page would pass Telegram's 4096 limit, cut names down
+        for cut in (None, 80, 50, 30):
+            msg = "".join(f"{i}. {ic} {_html.escape(nm if cut is None else nm[:cut])}\n{body}\n\n"
+                          for i, ic, nm, body in blocks)
+            if len(msg) <= 3500:
+                break
+        W = 31
+        def _row(t):
+            return "│ " + t.ljust(W - 1) + "│"
+        title = f"─ System · {n} task{'s' if n != 1 else ''} "
+        box = [
+            "╭" + title + "─" * (W - len(title)) + "╮",
+            _row(f"CPU {snap['cpu']:.0f}% │ RAM {snap['ram']:.0f}%"),
+            _row(f"Free {format_size(snap['free'])} │ Up {uptime}"),
+            _row(f"DL {format_size(dl_speed)}/s │ UL {format_size(ul_speed)}/s"),
+            _row(f"IN {format_size(snap['net_in'])} │ OUT {format_size(snap['net_out'])}"),
+            "╰" + "─" * W + "╯",
+        ]
+        msg += "<pre>" + _html.escape("\n".join(box)) + "</pre>"
 
     if pages > 1:
         keyboard = InlineKeyboardMarkup([
