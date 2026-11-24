@@ -24,7 +24,13 @@ from plugins.filename_utils import format_filename, has_rules, validate_swap
 # ================= Global State and Helpers (Placeholders to be set by bot.py) =================
 GLOBAL_STATE = {}
 ARIA2_API = None
-BOT_START = time.time()   # pyrogram Client has no start_time; uptime counts from import
+BOT_START = time.time()
+try:
+    import psutil as _ps
+    _n0 = _ps.net_io_counters()
+    _NET0 = (_n0.bytes_recv, _n0.bytes_sent)
+except Exception:
+    _NET0 = (0, 0)   # pyrogram Client has no start_time; uptime counts from import
 
 # Uploads work like Leechv2: every task uploads its own files ONE AT A TIME, and all tasks
 # upload at the same time (bandwidth is shared between them). MAX_UPLOADS > 0 optionally caps
@@ -1552,6 +1558,18 @@ def _dashboard_tasks(chat_id):
     return tasks
 
 
+def _bot_stats(snap, uptime, dl_speed, ul_speed, n, page=1, pages=1):
+    """BOT STATS footer: Page | Tasks, a rule, then paired bold-label rows."""
+    return (
+        f"<b>Page:</b> {page}/{pages} | <b>Tasks:</b> {n}\n"
+        "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"<b>CPU:</b> {snap['cpu']:.1f}% | <b>RAM:</b> {snap['ram']:.1f}%\n"
+        f"<b>Free:</b> {format_size(snap['free'])} | <b>Uptime:</b> {uptime}\n"
+        f"<b>IN:</b> {format_size(snap['net_in'])} | <b>OUT:</b> {format_size(snap['net_out'])}\n"
+        f"<b>DL:</b> {format_size(dl_speed)}/s | <b>UL:</b> {format_size(ul_speed)}/s"
+    )
+
+
 def _sys_snapshot():
     snap = {"cpu": 0.0, "ram": 0.0, "free": 0, "total": 1, "net_in": 0, "net_out": 0}
     try:
@@ -1559,7 +1577,8 @@ def _sys_snapshot():
         snap["cpu"] = psutil.cpu_percent(interval=None)
         snap["ram"] = psutil.virtual_memory().percent
         n = psutil.net_io_counters()
-        snap["net_in"], snap["net_out"] = n.bytes_recv, n.bytes_sent
+        snap["net_in"] = max(n.bytes_recv - _NET0[0], 0)       # total since bot start
+        snap["net_out"] = max(n.bytes_sent - _NET0[1], 0)
     except Exception:
         pass
     try:
@@ -1593,11 +1612,14 @@ async def render_dashboard(app, chat_id, page):
 
     if not tasks:
         msg = (
-            "💤 <i>No Active Downloads!</i>\n\n"
-            "<blockquote><b><i>Bot Stats</i></b></blockquote>\n"
-            f" • <b>CPU:</b> {snap['cpu']:.1f}% | <b>F:</b> {format_size(snap['free'])} "
-            f"[{snap['free'] * 100 / max(snap['total'], 1):.0f}%]\n"
-            f" • <b>RAM:</b> {snap['ram']:.1f}% | <b>UPTIME:</b> {uptime}"
+            "🌑 <b>Dark and empty.</b>\n\n"
+            "⌬ <b>Bot Stats</b>\n"
+            f"╭ <b>CPU</b> → {snap['cpu']:.1f}%\n"
+            f"┊ <b>RAM</b> → {snap['ram']:.2f}%\n"
+            f"┊ <b>Free</b> → {format_size(snap['free'])}\n"
+            f"┊ <b>IN</b> → {format_size(snap['net_in'])}\n"
+            f"┊ <b>OUT</b> → {format_size(snap['net_out'])}\n"
+            f"╰ <b>UP</b> → {uptime}"
         )
     else:
         blocks = []
@@ -1609,39 +1631,35 @@ async def render_dashboard(app, chat_id, page):
             else:
                 eta_str = "~"
             icon = {"⬇️ DL": "📥", "⬆️ UL": "📤"}.get(t["kind"], "🗜")
-            eng = _html.escape(str(t["engine"]))
+            elapsed = time.time() - t["start_time"]
+            mode = t["out_mode"] or t["in_mode"]
+
+            def _kv(k, v):
+                return f"<code>{k:<7}: </code>{v}"
             rows = [
-                f"┌ {leech_bar(pct)}  🔥 {pct:.2f}%",
-                f"├ 📦 <b>Processed :</b> {format_size(t['done'])} of {format_size(t['total'])} · <i>{_html.escape(t['status'])}</i>",
-                f"├ ⚡ <b>Speed :</b> {format_speed(t['speed'])}  ·  ⏳ <b>ETA :</b> {eta_str}",
-                f"├ ⚙️ <b>Engine :</b> {eng}",
+                f"<b>Task By</b> {_mention(t['user_first'], t['user_id'])}",
+                f"{leech_bar(pct)}  <b>{pct:.2f}%</b>",
+                _kv("Status", _html.escape(t["status"])),
+                _kv("Done", format_size(t["done"])),
+                _kv("Total", format_size(t["total"])),
+                _kv("Speed", format_speed(t["speed"])),
+                _kv("ETA", eta_str),
+                _kv("Past", time_fmt(elapsed)),
+                _kv("Engine", _html.escape(str(t["engine"]))),
+                _kv("Mode", _html.escape(mode)),
             ]
             if t["extra"]:
-                rows.append(f"├ {t['extra']}")
-            rows += [
-                f"└ 🛑 <b>Stop :</b> /c_{t['gid']} · 👤 {_mention(t['user_first'], t['user_id'])}",
-            ]
-            blocks.append((idx, icon, str(t["name"]), "\n".join(rows)))
+                rows.append(t["extra"])
+            body = "<blockquote>" + "\n".join(rows) + "</blockquote>" + f"\n<b>Stop :</b> /c_{t['gid']}"
+            blocks.append((idx, icon, str(t["name"]), body))
 
         # full file names; if the page would pass Telegram's 4096 limit, cut names down
         for cut in (None, 80, 50, 30):
-            msg = "".join(f"{i}. {ic} {_html.escape(nm if cut is None else nm[:cut])}\n\n{body}\n\n"
+            msg = "".join(f"{i}. {ic} <i>{_html.escape(nm if cut is None else nm[:cut])}</i>\n{body}\n\n"
                           for i, ic, nm, body in blocks)
-            if len(msg) <= 3500:
+            if len(msg) <= 3300:
                 break
-        W = 31
-        def _row(t):
-            return "│ " + t.ljust(W - 1) + "│"
-        title = f"─ System · {n} task{'s' if n != 1 else ''} "
-        box = [
-            "╭" + title + "─" * (W - len(title)) + "╮",
-            _row(f"CPU {snap['cpu']:.0f}% │ RAM {snap['ram']:.0f}%"),
-            _row(f"Free {format_size(snap['free'])} │ Up {uptime}"),
-            _row(f"DL {format_size(dl_speed)}/s │ UL {format_size(ul_speed)}/s"),
-            _row(f"IN {format_size(snap['net_in'])} │ OUT {format_size(snap['net_out'])}"),
-            "╰" + "─" * W + "╯",
-        ]
-        msg += "<pre>" + _html.escape("\n".join(box)) + "</pre>"
+        msg += _bot_stats(snap, uptime, dl_speed, ul_speed, n, page, pages)
 
     if pages > 1:
         keyboard = InlineKeyboardMarkup([
