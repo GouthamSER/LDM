@@ -146,8 +146,31 @@ if __name__ == "__main__":
     if UVICORN_AVAILABLE:
         start_web_server_thread(HEALTH_PORT)
     
+    async def _start_with_retry():
+        """Telegram outages (500 RPC_CALL_FAIL, FloodWait, network) must not kill the bot:
+        pyrogram gives up after 10 tries, so keep retrying with backoff."""
+        import asyncio
+        from pyrogram.errors import FloodWait
+        delay = 15
+        while True:
+            try:
+                await app.start()
+                return
+            except FloodWait as e:
+                wait = int(getattr(e, "value", 30)) + 5
+                print(f"⏳ FloodWait on start: sleeping {wait}s")
+                await asyncio.sleep(wait)
+            except Exception as e:
+                print(f"⚠️ Telegram start failed ({e.__class__.__name__}: {e}); retry in {delay}s")
+                try:
+                    await app.disconnect()
+                except Exception:
+                    pass
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 300)
+
     async def _main():
-        await app.start()
+        await _start_with_retry()
         try:
             await on_startup(app)      # command menu + restart notice + saved auth
         except Exception as e:
